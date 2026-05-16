@@ -124,7 +124,7 @@ if __name__ == "__main__":
     print("Testing Multi-Agent Graph Integration...")
     print("Running initial query through the Swarm...")
     
-    final_state = multi_agent_app.invoke({"query": "What are the biggest challenges with AI agents today?"})
+    final_state = multi_agent_app.invoke({"query": "What are the biggest global events happening in Europe or the Middle East?"})
     
     print("\n================ FINAL SUMMARY ================\n")
     print(final_state["summary"])
