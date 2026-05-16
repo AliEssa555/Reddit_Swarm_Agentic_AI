@@ -1,0 +1,4 @@
+myvenv/
+.env
+.env.example
+commands.txt
