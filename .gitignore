@@ -1,4 +1,5 @@
 myvenv/
+data/
 .env
 .env.example
 commands.txt
