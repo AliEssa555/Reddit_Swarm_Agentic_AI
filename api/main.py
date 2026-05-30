@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import sys
 import os
 
@@ -6,8 +8,42 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from scripts.nlp_topic_extraction import determine_topic
 from db.database import SessionLocal
 from db.models import TopicCategory, Topic, Post
+from agents.realtime_swarm import live_swarm
+
+from db.database import SessionLocal
+from db.models import TopicCategory, Topic, Post
 
 app = FastAPI(title="Reddit Swarm Dashboard API")
+
+# Setup CORS to allow Vue UI communication locally seamlessly
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # For local testing unrestricted access
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class QueryRequest(BaseModel):
+    query: str
+
+@app.post("/api/ask")
+async def ask_live_swarm_endpoint(req: QueryRequest):
+    """Synchronous endpoint triggering the entire live web scraping architecture on-demand!"""
+    print(f"\n[USER INITIATED]: {req.query}")
+    
+    result = live_swarm.invoke({
+        "original_query": req.query,
+        "search_keyword": "",
+        "raw_scraped_data": [],
+        "final_response": "",
+        "log_messages": []
+    })
+    
+    return {
+        "response": result.get("final_response"),
+        "logs": result.get("log_messages", [])
+    }
+
 
 @app.post("/webhook/reddit")
 async def reddit_webhook(request: Request):
@@ -77,5 +113,42 @@ async def reddit_webhook(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    # Start the fast API webhook listener!
+    import subprocess
+    import time
+    import requests
+    import atexit
+
+    llm_proc = None
+
+    def cleanup():
+        if llm_proc:
+            print("\n[SYSTEM] Shutting down local Qwen2.5 LLM server...")
+            llm_proc.terminate()
+
+    atexit.register(cleanup)
+
+    print("\n[SYSTEM] Booting up local Qwen2.5 LLM engine...")
+    cmd = [
+        r"C:\Users\PC\Downloads\Learn-and-Rise\llama_server_vulkan\llama-server.exe",
+        "-m", r"C:\Users\PC\Downloads\Learn-and-Rise\llama.cpp\qwen2.5-7b-q4_k_m.gguf",
+        "--port", "8085",
+        "-ngl", "999",
+        "-c", "8192",
+        "--host", "127.0.0.1"
+    ]
+    # We pipe outputs to DEVNULL to not spam the FastAPI terminal
+    llm_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    print("[SYSTEM] Pinging LLM health check on port 8085...")
+    for _ in range(45):
+        try:
+            r = requests.get("http://127.0.0.1:8085/health", timeout=1)
+            if r.status_code == 200 or r.status_code == 503: # 503 means loading weights but server is up
+                print("[SYSTEM] >>> LLM Engine is successfully ONLINE! <<<")
+                break
+        except:
+            pass
+        time.sleep(1)
+
+    print("\n[SYSTEM] Starting FastAPI Web Server...")
     uvicorn.run(app, host="0.0.0.0", port=8000)

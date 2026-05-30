@@ -55,19 +55,46 @@ const askSwarm = async () => {
     let currentQ = userQuery.value;
     userQuery.value = '';
     
-    // For now we simulate the interaction, but we will connect this straight to your Python endpoints
-    setTimeout(() => {
+    // Set a loading prompt while waiting for APIs!
+    messages.value.push({
+        id: "loading_msg",
+        role: "System (Swarm)",
+        text: `Executing autonomous search logic evaluating ${currentQ}... (BrightData scraping takes ~15 seconds)`
+    });
+    lastEval.value = null;
+
+    try {
+        const response = await fetch('http://localhost:8000/api/ask', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query: currentQ})
+        });
+        
+        const data = await response.json();
+        
+        // Remove loading
+        messages.value = messages.value.filter(m => m.id !== "loading_msg");
+        
         messages.value.push({
-            id: Date.now()+1,
-            role: "Swarm",
-            text: "Based on the recent Kaggle data, there are 1,420 posts classified under Technology..."
+            id: Date.now()+2,
+            role: "Swarm Answer",
+            text: data.response
         });
         
         lastEval.value = {
-            sql: "SELECT COUNT(*) FROM posts p JOIN topics t ON p.topic_id = t.id WHERE t.name = 'Technology';",
-            critic: "APPROVE: Query uses valid columns and limits execution safely."
+            sql: data.logs.join('\n'), // Re-purposed code block to emit Swarm interaction logs
+            critic: "Execution Logs Completed!"
         };
-    }, 1000);
+        
+    } catch (e) {
+        messages.value = messages.value.filter(m => m.id !== "loading_msg");
+        messages.value.push({ id: Date.now()+3, role: "System Error", text: "Error connecting to backend API: " + e.message });
+        
+        lastEval.value = {
+            sql: "Fetch error encountered.",
+            critic: `Check if Python FastAPI running on port 8000. Stack: ${e.message}`
+        };
+    }
 }
 </script>
 

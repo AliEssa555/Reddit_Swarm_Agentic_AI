@@ -44,6 +44,18 @@ class BrightDataPost(Base):
     snapshot_id = Column(String, nullable=True) # BrightData Job ID Tracking
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class BrightDataComment(Base):
+    __tablename__ = "brightdata_comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    comment_id = Column(String, unique=True, index=True)
+    post_reddit_id = Column(String, index=True)
+    body = Column(Text, nullable=True)
+    author = Column(String, nullable=True)
+    score = Column(Integer, default=0)
+    snapshot_id = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class Comment(Base):
     __tablename__ = "comments"
 

@@ -1,0 +1,236 @@
+import sys
+import os
+import requests
+import json
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+from services.llm_client import get_llm
+from config import BRIGHTDATA_API_KEY, TESTING_LIMIT, TESTING_COMMENTS_LIMIT
+from db.database import SessionLocal
+from db.models import BrightDataPost, BrightDataComment, AgentRun
+
+class LiveSwarmState(TypedDict):
+    original_query: str
+    search_keyword: str
+    raw_scraped_data: list
+    raw_scraped_comments: list
+    final_response: str
+    log_messages: list
+
+try:
+    llm = get_llm(temperature=0.3)
+except Exception as e:
+    llm = None
+    print(f"FAILED TO INITIATE LLM: {e}")
+
+def keyword_extractor_node(state: LiveSwarmState):
+    log = []
+    log.append(">>> AGENT: Keyword Extractor Working...")
+    
+    if not llm:
+        log.append("  -> CRITICAL ERROR: LLM is completely offline. Skipping extraction.")
+        return {"search_keyword": "technology", "log_messages": state.get("log_messages", []) + log}
+        
+    prompt = ChatPromptTemplate.from_template(
+        "You are an expert NLP keyword extractor. Analyze the user question and extract exactly ONE specific search keyword phrase that we can use to search Reddit for relevant news.\n"
+        "User Question: {query}\n"
+        "Keyword (NO QUOTES, JUST THE PHRASE):"
+    )
+    chain = prompt | llm | StrOutputParser()
+    try:
+        kw = chain.invoke({"query": state["original_query"]}).strip()
+        log.append(f"  -> Extracted Search Keyword: '{kw}'")
+        return {"search_keyword": kw, "log_messages": [msg for msg in state.get("log_messages", [])] + log}
+    except Exception as e:
+        log.append(f"  -> ERROR LLM offline or rejecting: {e}")
+        return {"search_keyword": "technology", "log_messages": [msg for msg in state.get("log_messages", [])] + log} 
+
+def scraper_node(state: LiveSwarmState):
+    log = []
+    log.append(f">>> TOOL: BrightData Synchronous Post & Comment Scraper Initiated for '{state.get('search_keyword')}'...")
+    
+    headers = {
+        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # 1. SCRAPE POSTS 
+    url_posts = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvz8ah06191smkebj4&notify=false&include_errors=true&type=discover_new&discover_by=keyword"
+    fetch_limit = min(TESTING_LIMIT, 20) 
+    
+    payload_posts = {
+        "input": [{"keyword": state.get("search_keyword", "news"), "date": "Past week", "num_of_posts": fetch_limit}]
+    }
+    
+    scraped_posts = []
+    try:
+        response_posts = requests.post(url_posts, headers=headers, json=payload_posts, timeout=120)
+        if response_posts.status_code == 200:
+            scraped_posts = response_posts.json()
+            log.append(f"  -> SUCCESS! Searched for posts. Scraped {len(scraped_posts)} live posts.")
+        else:
+            log.append(f"  -> ERROR fetching posts from BrightData: {response_posts.status_code} {response_posts.text}")
+    except Exception as e:
+        log.append(f"  -> ERROR HTTP failure on posts: {e}")
+
+    # 2. SCRAPE COMMENTS (only from the top 3 posts to save time/budget during testing)
+    scraped_comments = []
+    if scraped_posts:
+        log.append(f"  -> Sending secondary sync request to fetch comments (Limit {TESTING_COMMENTS_LIMIT} per post)...")
+        url_comments = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvzdpsdlw09j6t702&notify=false&include_errors=true"
+        
+        # Build multi-input array for the comment scraper
+        comments_inputList = []
+        for p in scraped_posts[:3]: # Cap at 3 posts to speed up API calls dramatically
+            if p.get("url"):
+                comments_inputList.append({
+                    "url": p.get("url"),
+                    "days_back": 180,
+                    "load_all_replies": False,
+                    "comment_limit": TESTING_COMMENTS_LIMIT
+                })
+                
+        payload_comments = {"input": comments_inputList}
+        
+        try:
+            response_comments = requests.post(url_comments, headers=headers, json=payload_comments, timeout=120)
+            if response_comments.status_code == 200:
+                scraped_comments = response_comments.json()
+                log.append(f"  -> SUCCESS! Scraped {len(scraped_comments)} live comments across top threads.")
+            else:
+                log.append(f"  -> ERROR fetching comments from BrightData: {response_comments.status_code} {response_comments.text}")
+        except Exception as e:
+            log.append(f"  -> ERROR HTTP failure on comments: {e}")
+
+    return {
+        "raw_scraped_data": scraped_posts, 
+        "raw_scraped_comments": scraped_comments,
+        "log_messages": state.get("log_messages", []) + log
+    }
+
+def database_writer_node(state: LiveSwarmState):
+    log = []
+    log.append(f">>> SYSTEM: Postgres Interactor Working...")
+         
+    try:
+        db = SessionLocal()
+        inserted_posts = 0
+        inserted_comments = 0
+        
+        for item in state.get("raw_scraped_data", []):
+            reddit_id = str(item.get("post_id", ""))
+            title = item.get("title", "")
+            
+            if not db.query(BrightDataPost).filter(BrightDataPost.reddit_id == reddit_id).first():
+                new_post = BrightDataPost(
+                    reddit_id=reddit_id,
+                    title=title[:255],
+                    body=item.get("description", ""),
+                    author=item.get("user_posted", "unknown"),
+                    score=item.get("num_upvotes", 0),
+                    snapshot_id="sync_discover_live"
+                )
+                db.add(new_post)
+                inserted_posts += 1
+                
+        for item in state.get("raw_scraped_comments", []):
+            comment_id = str(item.get("comment_id", ""))
+            post_id = str(item.get("post_id", ""))
+            if not db.query(BrightDataComment).filter(BrightDataComment.comment_id == comment_id).first():
+                new_com = BrightDataComment(
+                    comment_id=comment_id,
+                    post_reddit_id=post_id,
+                    body=item.get("comment", ""),
+                    author=item.get("user_posted", "unknown"),
+                    score=item.get("num_upvotes", 0),
+                    snapshot_id="sync_discover_live"
+                )
+                db.add(new_com)
+                inserted_comments += 1
+                
+        db.commit()
+        db.close()
+        log.append(f"  -> Wrote {inserted_posts} fresh posts and {inserted_comments} comments safely to PostgreSQL.")
+    except Exception as e:
+        log.append(f"  -> ERROR writing to DB: {e}")
+        
+    return {"log_messages": state.get("log_messages", []) + log}
+
+def synthesizer_node(state: LiveSwarmState):
+    log = []
+    log.append(f">>> AGENT: Synthesizer Response Generator Working...")
+    
+    if not llm:
+        log.append("  -> CRITICAL ERROR: LLM is completely offline. Skipping synthesis.")
+        msg = f"Sorry, your local LLM server is disconnected. But I successfully scraped and saved {len(state.get('raw_scraped_data', []))} raw posts to your memory!"
+        return {"final_response": msg, "log_messages": state.get("log_messages", []) + log}
+        
+    if not state.get("raw_scraped_data"):
+        return {"final_response": "I'm sorry, I could not fetch any real-time data from Bright Data. Please check your API credits or the connection limit.", "log_messages": state.get("log_messages", []) + log}
+        
+    context_str = "--- TOP REDDIT POSTS ---\n"
+    # Only feed top 5 posts into the LLM logic to avoid destroying local context windows
+    for idx, post in enumerate(state["raw_scraped_data"][:5]): 
+        context_str += f"Title: {post.get('title')}\nBodyText: {post.get('description', '')[:200]}...\nUpvotes: {post.get('num_upvotes')}\n\n"
+        
+    if state.get("raw_scraped_comments"):
+        context_str += "--- TOP REDDIT COMMENTS (What users are saying) ---\n"
+        for comment in state["raw_scraped_comments"][:15]:
+            context_str += f"User '{comment.get('user_posted', 'anon')}' says: {comment.get('comment', '')[:200]} (Upvotes: {comment.get('num_upvotes')})\n"
+            
+    prompt = ChatPromptTemplate.from_template(
+        "You are an analytical Reddit AI researcher. Based on the following real-time scraped posts and comments, answer the user's question directly and concisely.\n"
+        "User Question: {query}\n\n"
+        "Live Reddit Data:\n{context}\n\n"
+        "Synthesize what redditors are saying accurately and concisely (Keep it tight):"
+    )
+    chain = prompt | llm | StrOutputParser()
+    try:
+        response = chain.invoke({"query": state["original_query"], "context": context_str})
+        log.append(f"  -> Synthesized an intelligent, comment-aware analytical response for frontend display.")
+        return {"final_response": response, "log_messages": state.get("log_messages", []) + log}
+    except Exception as e:
+        log.append(f"  -> ERROR LLM offline during synthesis: {e}")
+        return {"final_response": f"Error: Local LLM threw an exception during synthesis: {e}", "log_messages": state.get("log_messages", []) + log}
+
+def log_to_db_node(state: LiveSwarmState):
+    """Stores the execution trace for the Vue evaluators."""
+    try:
+        db = SessionLocal()
+        logs_joined = "\n".join(state.get("log_messages", []))
+        
+        new_run = AgentRun(
+            agent_name="RealTime Sync Swarm",
+            task=state.get("original_query", ""),
+            result=state.get("final_response", ""),
+            evaluation_result=logs_joined
+        )
+        db.add(new_run)
+        db.commit()
+        db.close()
+    except Exception as e:
+        pass # Not critical to frontend return flow
+    return {}
+
+workflow = StateGraph(LiveSwarmState)
+workflow.add_node("keyword_extractor", keyword_extractor_node)
+workflow.add_node("scraper", scraper_node)
+workflow.add_node("db_writer", database_writer_node)
+workflow.add_node("synthesizer", synthesizer_node)
+workflow.add_node("logger", log_to_db_node)
+
+workflow.set_entry_point("keyword_extractor")
+workflow.add_edge("keyword_extractor", "scraper")
+workflow.add_edge("scraper", "db_writer")
+workflow.add_edge("db_writer", "synthesizer")
+workflow.add_edge("synthesizer", "logger")
+workflow.add_edge("logger", END)
+
+# Expose compiled swarm for FastAPI execution
+live_swarm = workflow.compile()
