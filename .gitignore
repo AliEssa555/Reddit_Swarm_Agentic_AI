@@ -3,3 +3,5 @@ data/
 .env
 .env.example
 commands.txt
+bright_data_docs/
+frontend/node_modules/
