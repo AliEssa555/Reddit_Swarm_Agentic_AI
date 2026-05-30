@@ -51,65 +51,97 @@ def keyword_extractor_node(state: LiveSwarmState):
         log.append(f"  -> ERROR LLM offline or rejecting: {e}")
         return {"search_keyword": "technology", "log_messages": [msg for msg in state.get("log_messages", [])] + log} 
 
+def _poll_snapshot(snapshot_id: str, headers: dict, log: list) -> list:
+    """BrightData's sync discover endpoints return a snapshot_id when they run over 60s.
+    This polls their /snapshot endpoint until data is ready (max 3 minutes)."""
+    import time
+    log.append(f"  -> BrightData returned snapshot_id: {snapshot_id}. Polling for results...")
+    poll_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snapshot_id}?format=json"
+    
+    for attempt in range(18):  # Poll every 10s for up to 3 minutes
+        time.sleep(10)
+        try:
+            r = requests.get(poll_url, headers=headers, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    log.append(f"  -> Snapshot ready! Received {len(data)} records after {(attempt+1)*10}s.")
+                    return data
+            elif r.status_code == 202:
+                log.append(f"  -> Snapshot still processing... ({(attempt+1)*10}s elapsed)")
+            else:
+                log.append(f"  -> Snapshot poll error: {r.status_code}")
+                break
+        except Exception as e:
+            log.append(f"  -> Poll attempt failed: {e}")
+    
+    log.append("  -> Snapshot polling exhausted with no data.")
+    return []
+
+def _post_brightdata(url: str, headers: dict, payload: dict, log: list, timeout: int = 90) -> list:
+    """Makes a BrightData POST, handling both immediate results and snapshot_id fallback."""
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        data = response.json()
+
+        # 200 with a list = data came back directly (fast path)
+        if response.status_code == 200 and isinstance(data, list):
+            return data
+
+        # 200 or 202 with snapshot_id = job is still running, poll for it
+        if isinstance(data, dict) and data.get("snapshot_id"):
+            return _poll_snapshot(data["snapshot_id"], headers, log)
+
+        log.append(f"  -> ERROR from BrightData: {response.status_code} {str(data)[:200]}")
+    except requests.exceptions.Timeout:
+        log.append(f"  -> Request timed out after {timeout}s. Try reducing BRIGHTDATA_MAX_POSTS_LIMIT in .env.")
+    except Exception as e:
+        log.append(f"  -> ERROR HTTP failure: {e}")
+    return []
+
 def scraper_node(state: LiveSwarmState):
     log = []
-    log.append(f">>> TOOL: BrightData Synchronous Post & Comment Scraper Initiated for '{state.get('search_keyword')}'...")
+    log.append(f">>> TOOL: BrightData Scraper Initiated for keyword '{state.get('search_keyword')}'...")
     
     headers = {
         "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # 1. SCRAPE POSTS 
+    # 1. SCRAPE POSTS via keyword discovery
+    fetch_limit = min(TESTING_LIMIT, 20)
     url_posts = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvz8ah06191smkebj4&notify=false&include_errors=true&type=discover_new&discover_by=keyword"
-    fetch_limit = min(TESTING_LIMIT, 20) 
-    
     payload_posts = {
         "input": [{"keyword": state.get("search_keyword", "news"), "date": "Past week", "num_of_posts": fetch_limit}]
     }
     
-    scraped_posts = []
-    try:
-        response_posts = requests.post(url_posts, headers=headers, json=payload_posts, timeout=120)
-        if response_posts.status_code == 200:
-            scraped_posts = response_posts.json()
-            log.append(f"  -> SUCCESS! Searched for posts. Scraped {len(scraped_posts)} live posts.")
-        else:
-            log.append(f"  -> ERROR fetching posts from BrightData: {response_posts.status_code} {response_posts.text}")
-    except Exception as e:
-        log.append(f"  -> ERROR HTTP failure on posts: {e}")
+    scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log)
+    if scraped_posts:
+        log.append(f"  -> Posts stage complete: {len(scraped_posts)} posts scraped.")
 
-    # 2. SCRAPE COMMENTS (only from the top 3 posts to save time/budget during testing)
+    # 2. SCRAPE COMMENTS from top post URLs
     scraped_comments = []
     if scraped_posts:
-        log.append(f"  -> Sending secondary sync request to fetch comments (Limit {TESTING_COMMENTS_LIMIT} per post)...")
+        log.append(f"  -> Fetching comments (limit {TESTING_COMMENTS_LIMIT}/post) from top 3 posts...")
         url_comments = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvzdpsdlw09j6t702&notify=false&include_errors=true"
         
-        # Build multi-input array for the comment scraper
-        comments_inputList = []
-        for p in scraped_posts[:3]: # Cap at 3 posts to speed up API calls dramatically
+        comments_input = []
+        for p in scraped_posts[:3]:
             if p.get("url"):
-                comments_inputList.append({
+                comments_input.append({
                     "url": p.get("url"),
                     "days_back": 180,
                     "load_all_replies": False,
                     "comment_limit": TESTING_COMMENTS_LIMIT
                 })
-                
-        payload_comments = {"input": comments_inputList}
         
-        try:
-            response_comments = requests.post(url_comments, headers=headers, json=payload_comments, timeout=120)
-            if response_comments.status_code == 200:
-                scraped_comments = response_comments.json()
-                log.append(f"  -> SUCCESS! Scraped {len(scraped_comments)} live comments across top threads.")
-            else:
-                log.append(f"  -> ERROR fetching comments from BrightData: {response_comments.status_code} {response_comments.text}")
-        except Exception as e:
-            log.append(f"  -> ERROR HTTP failure on comments: {e}")
+        if comments_input:
+            scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log)
+            if scraped_comments:
+                log.append(f"  -> Comments stage complete: {len(scraped_comments)} comments scraped.")
 
     return {
-        "raw_scraped_data": scraped_posts, 
+        "raw_scraped_data": scraped_posts,
         "raw_scraped_comments": scraped_comments,
         "log_messages": state.get("log_messages", []) + log
     }
@@ -131,7 +163,7 @@ def database_writer_node(state: LiveSwarmState):
                 new_post = BrightDataPost(
                     reddit_id=reddit_id,
                     title=title[:255],
-                    body=item.get("description", ""),
+                    body=(item.get("description") or ""),
                     author=item.get("user_posted", "unknown"),
                     score=item.get("num_upvotes", 0),
                     snapshot_id="sync_discover_live"
@@ -177,7 +209,7 @@ def synthesizer_node(state: LiveSwarmState):
     context_str = "--- TOP REDDIT POSTS ---\n"
     # Only feed top 5 posts into the LLM logic to avoid destroying local context windows
     for idx, post in enumerate(state["raw_scraped_data"][:5]): 
-        context_str += f"Title: {post.get('title')}\nBodyText: {post.get('description', '')[:200]}...\nUpvotes: {post.get('num_upvotes')}\n\n"
+        context_str += f"Title: {post.get('title')}\nBodyText: {(post.get('description') or '')[:200]}...\nUpvotes: {post.get('num_upvotes')}\n\n"
         
     if state.get("raw_scraped_comments"):
         context_str += "--- TOP REDDIT COMMENTS (What users are saying) ---\n"
