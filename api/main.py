@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sys
@@ -184,7 +184,7 @@ async def batch_scrape_category(req: ScrapeRequest):
         "input": [{"keyword": cat.name, "date": req.time_filter, "num_of_posts": req.num_posts}]
     }
     
-    scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=120)
+    scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=600)
     scraped_comments = []
     
     if scraped_posts:
@@ -200,7 +200,7 @@ async def batch_scrape_category(req: ScrapeRequest):
                         "comment_limit": req.num_comments
                     })
             if comments_input:
-                scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log, timeout=120)
+                scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log, timeout=600)
         
         # Save to DB
         for item in scraped_posts:
@@ -235,7 +235,7 @@ async def batch_scrape_category(req: ScrapeRequest):
         return {"message": f"Successfully scraped {len(scraped_posts)} posts and {len(scraped_comments)} comments."}
         
     db.close()
-    return {"error": "Scraping failed or timed out before retrieving any posts.", "message": "No data returned."}
+    raise HTTPException(status_code=400, detail="Scraping failed or timed out before retrieving any posts. No data returned.")
 
 
 @app.post("/webhook/reddit")
