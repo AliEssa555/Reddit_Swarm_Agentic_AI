@@ -54,24 +54,31 @@ def keyword_extractor_node(state: LiveSwarmState):
 
 def _poll_snapshot(snapshot_id: str, headers: dict, log: list) -> list:
     """BrightData's sync discover endpoints return a snapshot_id when they run over 60s.
-    This polls their /snapshot endpoint until data is ready (max 3 minutes)."""
+    This polls their /snapshot endpoint until data is ready (max 20 minutes)."""
     import time
     log.append(f"  -> BrightData returned snapshot_id: {snapshot_id}. Polling for results...")
     poll_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snapshot_id}?format=json"
     
-    for attempt in range(18):  # Poll every 10s for up to 3 minutes
+    for attempt in range(120):  # Poll every 10s for up to 20 minutes
         time.sleep(10)
         try:
             r = requests.get(poll_url, headers=headers, timeout=30)
             if r.status_code == 200:
-                data = r.json()
+                try:
+                    data = r.json()
+                except Exception:
+                    # Handle NDJSON streamed responses
+                    raw_lines = r.text.strip().split('\n')
+                    data = [json.loads(line) for line in raw_lines if line.strip()]
                 if isinstance(data, list) and len(data) > 0:
                     log.append(f"  -> Snapshot ready! Received {len(data)} records after {(attempt+1)*10}s.")
                     return data
+                # 200 but empty list means still preparing, keep polling
+                log.append(f"  -> Snapshot processing... ({(attempt+1)*10}s elapsed)")
             elif r.status_code == 202:
                 log.append(f"  -> Snapshot still processing... ({(attempt+1)*10}s elapsed)")
             else:
-                log.append(f"  -> Snapshot poll error: {r.status_code}")
+                log.append(f"  -> Snapshot poll error: {r.status_code} - {r.text[:100]}")
                 break
         except Exception as e:
             log.append(f"  -> Poll attempt failed: {e}")
