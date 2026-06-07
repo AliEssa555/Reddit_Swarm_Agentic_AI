@@ -6,12 +6,12 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from scripts.nlp_topic_extraction import determine_topic
-from db.database import SessionLocal
-from db.models import TopicCategory, Topic, Post
+from db.models import TopicCategory, Topic, Post, Base, AgentRun
 from agents.realtime_swarm import live_swarm
+from db.database import SessionLocal, engine
 
-from db.database import SessionLocal
-from db.models import TopicCategory, Topic, Post
+# Ensure all tables (including BrightData ones) are created in Postgres on startup
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Reddit Swarm Dashboard API")
 
@@ -43,6 +43,42 @@ async def ask_live_swarm_endpoint(req: QueryRequest):
         "response": result.get("final_response"),
         "logs": result.get("log_messages", [])
     }
+
+@app.get("/api/topics")
+async def get_topics():
+    """Fetch the hierarchical topic structure."""
+    db = SessionLocal()
+    categories = db.query(TopicCategory).all()
+    results = []
+    for cat in categories:
+        topics = db.query(Topic).filter(Topic.category_id == cat.id).all()
+        results.append({
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description,
+            "topics": [{"id": t.id, "name": t.name, "description": t.description} for t in topics]
+        })
+    db.close()
+    return results
+
+@app.get("/api/history")
+async def get_history():
+    """Fetch recent swarm execution runs for the observability page."""
+    db = SessionLocal()
+    runs = db.query(AgentRun).order_by(AgentRun.created_at.desc()).limit(20).all()
+    results = []
+    for run in runs:
+        results.append({
+            "id": run.id,
+            "agent_name": run.agent_name,
+            "task": run.task,
+            "result": run.result,
+            "evaluation": run.evaluation_result,
+            "latency": run.latency,
+            "created_at": run.created_at
+        })
+    db.close()
+    return results
 
 
 @app.post("/webhook/reddit")

@@ -38,9 +38,10 @@ def keyword_extractor_node(state: LiveSwarmState):
         return {"search_keyword": "technology", "log_messages": state.get("log_messages", []) + log}
         
     prompt = ChatPromptTemplate.from_template(
-        "You are an expert NLP keyword extractor. Analyze the user question and extract exactly ONE specific search keyword phrase that we can use to search Reddit for relevant news.\n"
+        "You are an expert NLP keyword extractor. Analyze the user question and extract ONLY the core subject or entity (the 'about' part) in exactly ONE search keyword phrase in ENGLISH.\n"
+        "Avoid meta-words like 'opinions', 'reddit', 'what', 'saying'. Focus on the topic itself (e.g. 'nuclear energy', 'quantum computing', 'US economy').\n"
         "User Question: {query}\n"
-        "Keyword (NO QUOTES, JUST THE PHRASE):"
+        "Keyword (ENGLISH ONLY, SUBJECT ONLY, NO QUOTES):"
     )
     chain = prompt | llm | StrOutputParser()
     try:
@@ -82,7 +83,20 @@ def _post_brightdata(url: str, headers: dict, payload: dict, log: list, timeout:
     """Makes a BrightData POST, handling both immediate results and snapshot_id fallback."""
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        data = response.json()
+        try:
+            # First try standard JSON array/object
+            data = response.json()
+        except Exception:
+            # Fallback: BrightData often returns 'JSON Lines' (NDJSON) if results are streamed
+            try:
+                raw_lines = response.text.strip().split('\n')
+                data = [json.loads(line) for line in raw_lines if line.strip()]
+                log.append(f"  -> Successfully parsed {len(data)} records from multi-line JSON.")
+            except Exception as e:
+                log.append(f"  -> ERROR: Persistent JSON parsing failure. Status: {response.status_code}")
+                preview = response.text[:200].replace('\n', ' ')
+                log.append(f"  -> RAW RESPONSE PREVIEW: {preview}")
+                return []
 
         # 200 with a list = data came back directly (fast path)
         if response.status_code == 200 and isinstance(data, list):
