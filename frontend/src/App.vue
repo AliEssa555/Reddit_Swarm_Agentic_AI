@@ -92,17 +92,32 @@
           
           <div class="tabs">
             <button :class="{active: activeTab === 'analysis'}" @click="activeTab = 'analysis'">Historical Analysis</button>
+            <button :class="{active: activeTab === 'charts'}" @click="activeTab = 'charts'">Data Visualizations</button>
             <button :class="{active: activeTab === 'scrape'}" @click="activeTab = 'scrape'">Batch Scrape</button>
           </div>
           
           <div v-if="activeTab === 'analysis'" class="tab-content">
-             <div v-if="isAnalyzing" class="loading-state">
+             <div v-if="!categoryAnalysis && !isAnalyzing" class="analysis-init">
+                <p>Ready to deeply analyze historical perspectives within <strong>{{ selectedCategory.name }}</strong>.</p>
+                <button class="action-btn" @click="generateAnalysis">Synthesize Historical Insights</button>
+             </div>
+             <div v-else-if="isAnalyzing" class="loading-state">
                 <div class="loader"></div>
                 <p>Synthesizing insights using Qwen2.5...</p>
              </div>
              <div v-else class="analysis-box">
-                <p v-if="categoryAnalysis" style="white-space: pre-wrap; line-height: 1.6;">{{ categoryAnalysis }}</p>
+                <div v-html="formattedAnalysis" class="markdown-body"></div>
              </div>
+          </div>
+          
+          <div v-show="activeTab === 'charts'" class="tab-content">
+            <p>Subtopic Post Distribution within <strong>{{ selectedCategory.name }}</strong></p>
+            <div class="chart-container" style="position: relative; height:400px; width:100%; margin-top: 1.5rem; background: rgba(0,0,0,0.2) padding: 1rem; border-radius: 8px;">
+              <canvas ref="chartCanvas"></canvas>
+            </div>
+            <div class="chart-filters" style="margin-top: 1rem; display: flex; justify-content: flex-end;">
+               <button class="action-btn small" @click="loadCharts">Refresh Data</button>
+            </div>
           </div>
           
           <div v-if="activeTab === 'scrape'" class="tab-content">
@@ -131,7 +146,19 @@
                 <span v-else class="loader"></span>
               </button>
             </div>
-            <div v-if="scrapeMessage" class="toast-message success">{{ scrapeMessage }}</div>
+
+            <div v-if="isScraping" class="scrape-status loading">
+              <div class="loader"></div>
+              <p>Scraper is running in the background. Collecting <strong>{{ scrapeForm.num_posts }}</strong> posts with <strong>{{ scrapeForm.num_comments }}</strong> comments each from BrightData...</p>
+            </div>
+
+            <div v-if="scrapeResult" :class="['scrape-status', scrapeResult.success ? 'result-success' : 'result-error']">
+              <span class="result-icon">{{ scrapeResult.success ? '✅' : '❌' }}</span>
+              <div>
+                <strong>{{ scrapeResult.success ? 'Scrape Complete' : 'Scrape Failed' }}</strong>
+                <p>{{ scrapeResult.message }}</p>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -186,7 +213,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, watch } from 'vue';
+import { ref, onMounted, nextTick, watch, computed } from 'vue';
+import { marked } from 'marked';
+import { Chart, registerables } from 'chart.js';
+Chart.register(...registerables);
 
 const currentView = ref('swarm');
 const messages = ref([{ id: 1, role: "System", text: "Swarm initialized. Ready for real-time Reddit analysis." }]);
@@ -205,10 +235,60 @@ const categoryAnalysis = ref('');
 const scrapeForm = ref({ num_posts: 100, num_comments: 10, time_filter: 'Past month' });
 const isScraping = ref(false);
 const scrapeMessage = ref('');
+const scrapeResult = ref(null);
+
+const formattedAnalysis = computed(() => {
+    return categoryAnalysis.value ? marked(categoryAnalysis.value) : '';
+});
+
+const chartCanvas = ref(null);
+let chartInstance = null;
+
+const loadCharts = async () => {
+    if (!selectedCategory.value) return;
+    try {
+        const res = await fetch(`http://localhost:8000/api/category/${selectedCategory.value.id}/metrics`);
+        const data = await res.json();
+        
+        if (data.error) throw new Error(data.error);
+
+        nextTick(() => {
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+            if (chartCanvas.value) {
+                chartInstance = new Chart(chartCanvas.value, {
+                    type: 'bar',
+                    data: data,
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { labels: { color: '#a5d6ff' } }
+                        },
+                        scales: {
+                            y: { ticks: { color: '#8b949e', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                            x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+                        }
+                    }
+                });
+            }
+        });
+    } catch (e) {
+        console.error("Chart load failed:", e);
+    }
+};
+
+watch(activeTab, (newTab) => {
+    if (newTab === 'charts') {
+        loadCharts();
+    }
+});
 
 const formatTime = (iso) => {
     return new Date(iso).toLocaleTimeString();
 };
+
 
 const scrollToBottom = () => {
     nextTick(() => {
@@ -244,11 +324,16 @@ const selectCategory = async (cat) => {
     selectedCategory.value = cat;
     activeTab.value = 'analysis';
     categoryAnalysis.value = '';
-    isAnalyzing.value = true;
+    isAnalyzing.value = false;
     scrapeMessage.value = '';
-    
+};
+
+const generateAnalysis = async () => {
+    if (!selectedCategory.value) return;
+    isAnalyzing.value = true;
+    categoryAnalysis.value = '';
     try {
-        const res = await fetch(`http://localhost:8000/api/category/${cat.id}/analysis`);
+        const res = await fetch(`http://localhost:8000/api/category/${selectedCategory.value.id}/analysis`);
         const data = await res.json();
         categoryAnalysis.value = data.response || data.error;
     } catch (e) {
@@ -260,7 +345,7 @@ const selectCategory = async (cat) => {
 
 const submitScrape = async () => {
     isScraping.value = true;
-    scrapeMessage.value = "";
+    scrapeResult.value = null;
     
     const payload = {
         category_id: selectedCategory.value.id,
@@ -276,12 +361,15 @@ const submitScrape = async () => {
             body: JSON.stringify(payload)
         });
         const data = await res.json();
-        scrapeMessage.value = data.message || "Scraping initiated.";
+        if (res.ok) {
+            scrapeResult.value = { success: true, message: data.message || 'Scraping job completed successfully.' };
+        } else {
+            scrapeResult.value = { success: false, message: data.detail || data.error || 'Server returned an error.' };
+        }
     } catch (e) {
-        scrapeMessage.value = "Failed to initialize scraper.";
+        scrapeResult.value = { success: false, message: 'Failed to connect to scraper backend. Is the server running?' };
     } finally {
         isScraping.value = false;
-        setTimeout(() => scrapeMessage.value = '', 10000); // Clear after 10s
     }
 };
 
@@ -558,6 +646,12 @@ nav button.active {
     min-width: 120px;
 }
 
+.action-btn.small {
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
+    min-width: auto;
+}
+
 /* Audit Logs */
 .audit-logs {
     background: #010409;
@@ -695,6 +789,54 @@ nav button.active {
     border-left: 4px solid #00f2fe;
 }
 
+.analysis-init {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 3rem 1rem;
+    background: rgba(0,0,0,0.2);
+    border-radius: 8px;
+    text-align: center;
+}
+
+.analysis-init p {
+    color: #e6edf3;
+    font-size: 1.1rem;
+}
+
+.analysis-init .action-btn {
+    min-width: 250px;
+}
+
+.markdown-body {
+    line-height: 1.6;
+    color: #e6edf3;
+    font-size: 0.95rem;
+}
+
+.markdown-body :deep(h1), 
+.markdown-body :deep(h2), 
+.markdown-body :deep(h3), 
+.markdown-body :deep(h4) {
+    margin-top: 1.5rem;
+    margin-bottom: 0.8rem;
+    color: #fff;
+}
+
+.markdown-body :deep(ul) {
+    padding-left: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.markdown-body :deep(li) {
+    margin-bottom: 0.4rem;
+}
+
+.markdown-body :deep(strong) {
+    color: #a5d6ff;
+}
+
 .scrape-form {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
@@ -720,9 +862,16 @@ nav button.active {
 .form-group input, .form-group select {
     padding: 0.8rem;
     border-radius: 6px;
-    background: rgba(255,255,255,0.05);
+    background: #161b22;
     border: 1px solid rgba(255,255,255,0.1);
-    color: white;
+    color: #e6edf3;
+    appearance: auto;
+}
+
+.form-group select option {
+    background: #161b22;
+    color: #e6edf3;
+    padding: 0.5rem;
 }
 
 .action-btn {
@@ -756,6 +905,49 @@ nav button.active {
     background: rgba(52, 199, 89, 0.1);
     color: #34c759;
     border: 1px solid rgba(52, 199, 89, 0.3);
+}
+
+.scrape-status {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.2rem 1.5rem;
+    border-radius: 8px;
+    margin-top: 1.5rem;
+    animation: fadeIn 0.3s ease;
+}
+
+.scrape-status.loading {
+    background: rgba(79, 172, 254, 0.08);
+    border: 1px solid rgba(79, 172, 254, 0.2);
+    color: #a5d6ff;
+}
+
+.scrape-status.result-success {
+    background: rgba(52, 199, 89, 0.1);
+    border: 1px solid rgba(52, 199, 89, 0.3);
+    color: #34c759;
+}
+
+.scrape-status.result-error {
+    background: rgba(255, 69, 58, 0.1);
+    border: 1px solid rgba(255, 69, 58, 0.3);
+    color: #ff453a;
+}
+
+.scrape-status .result-icon {
+    font-size: 1.5rem;
+}
+
+.scrape-status p {
+    margin: 0.3rem 0 0;
+    font-size: 0.9rem;
+    opacity: 0.85;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 .loading-state {

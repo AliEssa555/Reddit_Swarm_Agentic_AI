@@ -125,6 +125,40 @@ async def analyze_category(category_id: int):
     except Exception as e:
         return {"response": f"LLM Error: {e}"}
 
+@app.get("/api/category/{category_id}/metrics")
+async def category_metrics(category_id: int):
+    """Returns post counts per subtopic for visualizations."""
+    db = SessionLocal()
+    cat = db.query(TopicCategory).filter(TopicCategory.id == category_id).first()
+    if not cat:
+        db.close()
+        return {"error": "Category not found."}
+        
+    topics = db.query(Topic).filter(Topic.category_id == cat.id).all()
+    
+    labels = []
+    counts = []
+    
+    for t in topics:
+        # Count in Post
+        count1 = db.query(Post).filter(Post.topic_id == t.id).count()
+        # Count in BrightDataPost
+        count2 = db.query(BrightDataPost).filter(BrightDataPost.topic_id == t.id).count()
+        labels.append(t.name)
+        counts.append(count1 + count2)
+        
+    db.close()
+    return {
+        "labels": labels,
+        "datasets": [
+            {
+                "label": "Total Posts",
+                "data": counts,
+                "backgroundColor": "#4facfe"
+            }
+        ]
+    }
+
 class ScrapeRequest(BaseModel):
     category_id: int
     num_posts: int
@@ -140,74 +174,68 @@ async def batch_scrape_category(req: ScrapeRequest):
     if not cat:
         return {"error": "Category not found."}
         
-    # We would ideally run this in a background task, but for MVP synchronous is okay if short limits.
-    # We will trigger the BrightData Discover directly.
-    import threading
-    def background_scrape():
-        log = []
-        headers = {
-            "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        url_posts = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvz8ah06191smkebj4&notify=false&include_errors=true&type=discover_new&discover_by=keyword"
-        payload_posts = {
-            "input": [{"keyword": cat.name, "date": req.time_filter, "num_of_posts": req.num_posts}]
-        }
-        
-        scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=120)
-        
-        if scraped_posts:
-            scraped_comments = []
-            if req.num_comments > 0:
-                url_comments = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvzdpsdlw09j6t702&notify=false&include_errors=true"
-                comments_input = []
-                for p in scraped_posts[:3]: # limit to top 3 for speed
-                    if p.get("url"):
-                        comments_input.append({
-                            "url": p.get("url"),
-                            "days_back": 180,
-                            "load_all_replies": False,
-                            "comment_limit": req.num_comments
-                        })
-                if comments_input:
-                    scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log, timeout=120)
-            
-            # Save to DB
-            db_inner = SessionLocal()
-            for item in scraped_posts:
-                reddit_id = str(item.get("post_id", ""))
-                title = item.get("title", "")
-                if not db_inner.query(BrightDataPost).filter(BrightDataPost.reddit_id == reddit_id).first():
-                    new_post = BrightDataPost(
-                        reddit_id=reddit_id,
-                        title=title[:255],
-                        body=(item.get("description") or ""),
-                        author=item.get("user_posted", "unknown"),
-                        score=item.get("num_upvotes", 0),
-                        topic_id=None # We could parse topic here using determine_topic
-                    )
-                    db_inner.add(new_post)
-            
-            for item in scraped_comments:
-                comment_id = str(item.get("comment_id", ""))
-                post_id = str(item.get("post_id", ""))
-                if not db_inner.query(BrightDataComment).filter(BrightDataComment.comment_id == comment_id).first():
-                    new_com = BrightDataComment(
-                        comment_id=comment_id,
-                        post_reddit_id=post_id,
-                        body=item.get("comment", ""),
-                        author=item.get("user_posted", "unknown"),
-                        score=item.get("num_upvotes", 0)
-                    )
-                    db_inner.add(new_com)
-                    
-            db_inner.commit()
-            db_inner.close()
-
-    thread = threading.Thread(target=background_scrape)
-    thread.start()
+    log = []
+    headers = {
+        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    url_posts = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvz8ah06191smkebj4&notify=false&include_errors=true&type=discover_new&discover_by=keyword"
+    payload_posts = {
+        "input": [{"keyword": cat.name, "date": req.time_filter, "num_of_posts": req.num_posts}]
+    }
     
-    return {"message": f"Background scraping task started for '{cat.name}' with {req.num_posts} target posts."}
+    scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=120)
+    scraped_comments = []
+    
+    if scraped_posts:
+        if req.num_comments > 0:
+            url_comments = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvzdpsdlw09j6t702&notify=false&include_errors=true"
+            comments_input = []
+            for p in scraped_posts[:3]: # limit to top 3 for speed
+                if p.get("url"):
+                    comments_input.append({
+                        "url": p.get("url"),
+                        "days_back": 180,
+                        "load_all_replies": False,
+                        "comment_limit": req.num_comments
+                    })
+            if comments_input:
+                scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log, timeout=120)
+        
+        # Save to DB
+        for item in scraped_posts:
+            reddit_id = str(item.get("post_id", ""))
+            title = item.get("title", "")
+            if not db.query(BrightDataPost).filter(BrightDataPost.reddit_id == reddit_id).first():
+                new_post = BrightDataPost(
+                    reddit_id=reddit_id,
+                    title=title[:255],
+                    body=(item.get("description") or ""),
+                    author=item.get("user_posted", "unknown"),
+                    score=item.get("num_upvotes", 0),
+                    topic_id=None # We could parse topic here using determine_topic
+                )
+                db.add(new_post)
+        
+        for item in scraped_comments:
+            comment_id = str(item.get("comment_id", ""))
+            post_id = str(item.get("post_id", ""))
+            if not db.query(BrightDataComment).filter(BrightDataComment.comment_id == comment_id).first():
+                new_com = BrightDataComment(
+                    comment_id=comment_id,
+                    post_reddit_id=post_id,
+                    body=item.get("comment", ""),
+                    author=item.get("user_posted", "unknown"),
+                    score=item.get("num_upvotes", 0)
+                )
+                db.add(new_com)
+                
+        db.commit()
+        db.close()
+        return {"message": f"Successfully scraped {len(scraped_posts)} posts and {len(scraped_comments)} comments."}
+        
+    db.close()
+    return {"error": "Scraping failed or timed out before retrieving any posts.", "message": "No data returned."}
 
 
 @app.post("/webhook/reddit")
