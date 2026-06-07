@@ -80,23 +80,78 @@
       <!-- Topic Hierarchy View -->
       <section v-if="currentView === 'topics'" class="view-section topics-view">
         <div class="view-header">
-          <h2>Topic Hierarchy</h2>
-          <p>Autonomous taxonomy generated from Reddit posts</p>
+          <h2>Topic Analytics & Scraping</h2>
+          <p>Explore autonomous taxonomy or trigger targeted Swarm Scraping</p>
         </div>
-        <div class="topic-grid" v-if="categories.length">
-          <div v-for="cat in categories" :key="cat.id" class="category-card glass-panel">
+        
+        <div v-if="selectedCategory" class="category-detail glass-panel">
+          <div class="detail-header">
+            <h3>{{ selectedCategory.name }} <span class="badge">Deep Dive</span></h3>
+            <button class="back-btn" @click="selectedCategory = null">← Back to Overview</button>
+          </div>
+          
+          <div class="tabs">
+            <button :class="{active: activeTab === 'analysis'}" @click="activeTab = 'analysis'">Historical Analysis</button>
+            <button :class="{active: activeTab === 'scrape'}" @click="activeTab = 'scrape'">Batch Scrape</button>
+          </div>
+          
+          <div v-if="activeTab === 'analysis'" class="tab-content">
+             <div v-if="isAnalyzing" class="loading-state">
+                <div class="loader"></div>
+                <p>Synthesizing insights using Qwen2.5...</p>
+             </div>
+             <div v-else class="analysis-box">
+                <p v-if="categoryAnalysis" style="white-space: pre-wrap; line-height: 1.6;">{{ categoryAnalysis }}</p>
+             </div>
+          </div>
+          
+          <div v-if="activeTab === 'scrape'" class="tab-content">
+            <p>Targeted Data Extraction for <strong>{{ selectedCategory.name }}</strong></p>
+            <div class="scrape-form">
+              <div class="form-group">
+                <label>Number of Posts</label>
+                <input type="number" v-model="scrapeForm.num_posts" min="10" max="1000" />
+              </div>
+              <div class="form-group">
+                <label>Comments Per Post</label>
+                <input type="number" v-model="scrapeForm.num_comments" min="0" max="100" />
+              </div>
+              <div class="form-group">
+                <label>Time Filter</label>
+                <select v-model="scrapeForm.time_filter">
+                  <option value="Past 24 hours">Past 24 hours</option>
+                  <option value="Past week">Past week</option>
+                  <option value="Past month">Past month</option>
+                  <option value="Past year">Past year</option>
+                  <option value="All time">All time</option>
+                </select>
+              </div>
+              <button class="action-btn" @click="submitScrape" :disabled="isScraping">
+                <span v-if="!isScraping">Initialize Swarm Scraper</span>
+                <span v-else class="loader"></span>
+              </button>
+            </div>
+            <div v-if="scrapeMessage" class="toast-message success">{{ scrapeMessage }}</div>
+          </div>
+        </div>
+
+        <div v-else class="topic-grid">
+          <div 
+            v-for="cat in categories" 
+            :key="cat.id" 
+            class="category-card glass-panel"
+            @click="selectCategory(cat)"
+          >
             <div class="category-header">
               <h4>{{ cat.name }}</h4>
             </div>
             <ul class="topic-list">
-              <li v-for="top in cat.topics" :key="top.id">
+              <li v-for="top in cat.topics.slice(0, 5)" :key="top.id">
                 <span class="dot"></span> {{ top.name }}
               </li>
+              <li v-if="cat.topics.length > 5" class="more">+{{ cat.topics.length - 5 }} more topics</li>
             </ul>
           </div>
-        </div>
-        <div v-else class="empty-state glass-panel">
-          <p>No topics extracted yet. Run a swarm query to populate the hierarchy.</p>
         </div>
       </section>
 
@@ -104,7 +159,7 @@
       <section v-if="currentView === 'history'" class="view-section history-view">
         <div class="view-header">
           <h2>Agent Observability</h2>
-          <p>Trace analysis, generated SQL, and execution latencies</p>
+          <p>Trace analysis and generated SQL</p>
         </div>
         <div class="history-list">
           <div v-for="run in history" :key="run.id" class="run-card glass-panel">
@@ -142,6 +197,15 @@ const categories = ref([]);
 const history = ref([]);
 const chatScroll = ref(null);
 
+// Drill Down State
+const selectedCategory = ref(null);
+const activeTab = ref('analysis');
+const isAnalyzing = ref(false);
+const categoryAnalysis = ref('');
+const scrapeForm = ref({ num_posts: 100, num_comments: 10, time_filter: 'Past month' });
+const isScraping = ref(false);
+const scrapeMessage = ref('');
+
 const formatTime = (iso) => {
     return new Date(iso).toLocaleTimeString();
 };
@@ -173,7 +237,53 @@ onMounted(() => {
 
 watch(currentView, (newView) => {
     if (newView !== 'swarm') fetchData();
+    if (newView !== 'topics') selectedCategory.value = null; // Reset selection on navigate away
 });
+
+const selectCategory = async (cat) => {
+    selectedCategory.value = cat;
+    activeTab.value = 'analysis';
+    categoryAnalysis.value = '';
+    isAnalyzing.value = true;
+    scrapeMessage.value = '';
+    
+    try {
+        const res = await fetch(`http://localhost:8000/api/category/${cat.id}/analysis`);
+        const data = await res.json();
+        categoryAnalysis.value = data.response || data.error;
+    } catch (e) {
+        categoryAnalysis.value = "Failed to communicate with LLM.";
+    } finally {
+        isAnalyzing.value = false;
+    }
+};
+
+const submitScrape = async () => {
+    isScraping.value = true;
+    scrapeMessage.value = "";
+    
+    const payload = {
+        category_id: selectedCategory.value.id,
+        num_posts: scrapeForm.value.num_posts,
+        num_comments: scrapeForm.value.num_comments,
+        time_filter: scrapeForm.value.time_filter
+    };
+    
+    try {
+        const res = await fetch('http://localhost:8000/api/category/scrape', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        scrapeMessage.value = data.message || "Scraping initiated.";
+    } catch (e) {
+        scrapeMessage.value = "Failed to initialize scraper.";
+    } finally {
+        isScraping.value = false;
+        setTimeout(() => scrapeMessage.value = '', 10000); // Clear after 10s
+    }
+};
 
 const askSwarm = async () => {
     if (!userQuery.value.trim() || isLoading.value) return;
@@ -465,7 +575,7 @@ nav button.active {
     padding: 0.3rem 0;
 }
 
-/* Topic Grid */
+/* Topic Grid & Detail */
 .topic-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -474,6 +584,15 @@ nav button.active {
 
 .category-card {
     padding: 1.5rem;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+
+.category-card:hover {
+    transform: translateY(-5px);
+    border-color: #4facfe;
+    box-shadow: 0 10px 30px rgba(79, 172, 254, 0.1);
 }
 
 .category-card h4 {
@@ -502,6 +621,149 @@ nav button.active {
 }
 
 .dot { width: 6px; height: 6px; background: #00f2fe; border-radius: 50%; }
+
+.category-detail {
+    padding: 2rem;
+    animation: fadeIn 0.3s ease-out;
+}
+
+.detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+}
+
+.detail-header h3 {
+    margin: 0;
+    font-size: 1.8rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.badge {
+    font-size: 0.8rem;
+    background: rgba(79, 172, 254, 0.2);
+    color: #a5d6ff;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.back-btn {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #fff;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.back-btn:hover {
+    background: rgba(255,255,255,0.1);
+}
+
+.tabs {
+    display: flex;
+    gap: 1rem;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    margin-bottom: 2rem;
+}
+
+.tabs button {
+    background: none;
+    border: none;
+    padding: 1rem 1.5rem;
+    color: #8b949e;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 1rem;
+    border-bottom: 2px solid transparent;
+}
+
+.tabs button.active {
+    color: #4facfe;
+    border-bottom-color: #4facfe;
+}
+
+.analysis-box {
+    background: rgba(0,0,0,0.2);
+    padding: 2rem;
+    border-radius: 8px;
+    border-left: 4px solid #00f2fe;
+}
+
+.scrape-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1.5rem;
+    background: rgba(0,0,0,0.2);
+    padding: 2rem;
+    border-radius: 8px;
+    margin-top: 1rem;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.form-group label {
+    font-size: 0.9rem;
+    color: #a5d6ff;
+    font-weight: 600;
+}
+
+.form-group input, .form-group select {
+    padding: 0.8rem;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: white;
+}
+
+.action-btn {
+    grid-column: 1 / -1;
+    padding: 1rem;
+    background: linear-gradient(135deg, #4facfe, #00f2fe);
+    border: none;
+    border-radius: 8px;
+    color: #111;
+    font-weight: bold;
+    font-size: 1rem;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    transition: transform 0.2s;
+}
+
+.action-btn:hover {
+    transform: translateY(-2px);
+}
+
+.toast-message {
+    margin-top: 1rem;
+    padding: 1rem;
+    border-radius: 8px;
+    text-align: center;
+    font-weight: 500;
+}
+
+.toast-message.success {
+    background: rgba(52, 199, 89, 0.1);
+    color: #34c759;
+    border: 1px solid rgba(52, 199, 89, 0.3);
+}
+
+.loading-state {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    color: #4facfe;
+}
 
 /* History View */
 .history-list {
@@ -540,10 +802,15 @@ summary { cursor: pointer; color: #4facfe; font-size: 0.9rem; }
 .loader {
     width: 20px;
     height: 20px;
-    border: 2px solid #0d1117;
+    border: 2px solid #fff;
     border-bottom-color: transparent;
     border-radius: 50%;
     animation: rotation 1s linear infinite;
+}
+
+.action-btn .loader {
+    border-color: #111;
+    border-bottom-color: transparent;
 }
 
 @keyframes rotation {

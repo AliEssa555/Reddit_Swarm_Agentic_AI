@@ -6,9 +6,14 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from scripts.nlp_topic_extraction import determine_topic
-from db.models import TopicCategory, Topic, Post, Base, AgentRun
-from agents.realtime_swarm import live_swarm
+from db.models import TopicCategory, Topic, Post, Base, AgentRun, BrightDataPost, BrightDataComment
+from agents.realtime_swarm import live_swarm, _post_brightdata
 from db.database import SessionLocal, engine
+from services.llm_client import get_llm
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from config import BRIGHTDATA_API_KEY
+import config
 
 # Ensure all tables (including BrightData ones) are created in Postgres on startup
 Base.metadata.create_all(bind=engine)
@@ -79,6 +84,130 @@ async def get_history():
         })
     db.close()
     return results
+
+@app.get("/api/category/{category_id}/analysis")
+async def analyze_category(category_id: int):
+    """Feeds historical category data to the LLM for synthesis."""
+    db = SessionLocal()
+    cat = db.query(TopicCategory).filter(TopicCategory.id == category_id).first()
+    if not cat:
+        db.close()
+        return {"error": "Category not found."}
+    
+    topics = db.query(Topic).filter(Topic.category_id == cat.id).all()
+    topic_ids = [t.id for t in topics]
+    
+    posts = db.query(Post).filter(Post.topic_id.in_(topic_ids)).limit(20).all()
+    bd_posts = db.query(BrightDataPost).filter(BrightDataPost.topic_id.in_(topic_ids)).limit(20).all()
+    
+    all_posts = posts + bd_posts
+    
+    if len(all_posts) < 5:
+        db.close()
+        return {"response": "Not enough data available to form a comprehensive analysis."}
+        
+    context_str = f"--- HISTORICAL POSTS FOR TOPIC: {cat.name} ---\n"
+    for post in all_posts[:20]:
+        context_str += f"Title: {post.title}\nBody: {(post.body or '')[:200]}...\n\n"
+        
+    db.close()
+    
+    llm = get_llm()
+    prompt = ChatPromptTemplate.from_template(
+        "You are an analytical Reddit AI. Based on the following historical posts in the '{category_name}' category, synthesize what the topics being discussed are and what people's views on them are. Keep it analytical and structured.\n"
+        "Historical Data:\n{context}\n\n"
+        "Synthesized Analysis:"
+    )
+    chain = prompt | llm | StrOutputParser()
+    try:
+        response = chain.invoke({"category_name": cat.name, "context": context_str})
+        return {"response": response}
+    except Exception as e:
+        return {"response": f"LLM Error: {e}"}
+
+class ScrapeRequest(BaseModel):
+    category_id: int
+    num_posts: int
+    num_comments: int
+    time_filter: str
+
+@app.post("/api/category/scrape")
+async def batch_scrape_category(req: ScrapeRequest):
+    """Trigger a batch BrightData scrape specifically targeting a Category."""
+    db = SessionLocal()
+    cat = db.query(TopicCategory).filter(TopicCategory.id == req.category_id).first()
+    db.close()
+    if not cat:
+        return {"error": "Category not found."}
+        
+    # We would ideally run this in a background task, but for MVP synchronous is okay if short limits.
+    # We will trigger the BrightData Discover directly.
+    import threading
+    def background_scrape():
+        log = []
+        headers = {
+            "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        url_posts = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvz8ah06191smkebj4&notify=false&include_errors=true&type=discover_new&discover_by=keyword"
+        payload_posts = {
+            "input": [{"keyword": cat.name, "date": req.time_filter, "num_of_posts": req.num_posts}]
+        }
+        
+        scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=120)
+        
+        if scraped_posts:
+            scraped_comments = []
+            if req.num_comments > 0:
+                url_comments = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvzdpsdlw09j6t702&notify=false&include_errors=true"
+                comments_input = []
+                for p in scraped_posts[:3]: # limit to top 3 for speed
+                    if p.get("url"):
+                        comments_input.append({
+                            "url": p.get("url"),
+                            "days_back": 180,
+                            "load_all_replies": False,
+                            "comment_limit": req.num_comments
+                        })
+                if comments_input:
+                    scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log, timeout=120)
+            
+            # Save to DB
+            db_inner = SessionLocal()
+            for item in scraped_posts:
+                reddit_id = str(item.get("post_id", ""))
+                title = item.get("title", "")
+                if not db_inner.query(BrightDataPost).filter(BrightDataPost.reddit_id == reddit_id).first():
+                    new_post = BrightDataPost(
+                        reddit_id=reddit_id,
+                        title=title[:255],
+                        body=(item.get("description") or ""),
+                        author=item.get("user_posted", "unknown"),
+                        score=item.get("num_upvotes", 0),
+                        topic_id=None # We could parse topic here using determine_topic
+                    )
+                    db_inner.add(new_post)
+            
+            for item in scraped_comments:
+                comment_id = str(item.get("comment_id", ""))
+                post_id = str(item.get("post_id", ""))
+                if not db_inner.query(BrightDataComment).filter(BrightDataComment.comment_id == comment_id).first():
+                    new_com = BrightDataComment(
+                        comment_id=comment_id,
+                        post_reddit_id=post_id,
+                        body=item.get("comment", ""),
+                        author=item.get("user_posted", "unknown"),
+                        score=item.get("num_upvotes", 0)
+                    )
+                    db_inner.add(new_com)
+                    
+            db_inner.commit()
+            db_inner.close()
+
+    thread = threading.Thread(target=background_scrape)
+    thread.start()
+    
+    return {"message": f"Background scraping task started for '{cat.name}' with {req.num_posts} target posts."}
 
 
 @app.post("/webhook/reddit")
