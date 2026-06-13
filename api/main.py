@@ -102,6 +102,8 @@ async def delete_category(category_id: int):
         db.close()
         raise HTTPException(status_code=404, detail="Category not found")
     
+    cat_name = cat.name  # Save name before deletion
+    
     # 1. Find all topics in this category
     topics = db.query(Topic).filter(Topic.category_id == category_id).all()
     topic_ids = [t.id for t in topics]
@@ -120,7 +122,7 @@ async def delete_category(category_id: int):
     
     db.commit()
     db.close()
-    return {"message": f"Category '{cat.name}' and all associated data deleted successfully."}
+    return {"message": f"Category '{cat_name}' and all associated data deleted successfully."}
 
 @app.get("/api/history")
 async def get_history():

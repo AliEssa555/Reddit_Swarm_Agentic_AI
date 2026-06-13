@@ -91,7 +91,9 @@
           <div class="detail-header">
             <h3>{{ selectedCategory.name }} <span class="badge">Deep Dive</span></h3>
             <div class="detail-actions">
-              <button class="delete-btn-link" @click="confirmDelete(selectedCategory)">Delete Category</button>
+              <button class="action-btn danger-btn" @click="confirmDelete(selectedCategory)">
+                <span class="btn-icon">🗑️</span> Delete Category
+              </button>
               <button class="back-btn" @click="selectedCategory = null">← Back to Overview</button>
             </div>
           </div>
@@ -267,6 +269,7 @@ const activeTab = ref('analysis');
 const isAnalyzing = ref(false);
 const categoryAnalysis = ref('');
 const scrapeForm = ref({ num_posts: 100, num_comments: 10, time_filter: 'Past month' });
+const isScraping = ref(false);
 const scrapeResult = ref(null);
 
 // Create Category Modal State
@@ -406,6 +409,7 @@ const generateAnalysis = async () => {
 };
 
 const submitScrape = async () => {
+    console.log("Starting scrape for category:", selectedCategory.value.name);
     isScraping.value = true;
     scrapeResult.value = null;
     
@@ -838,20 +842,23 @@ nav button.active {
     background: rgba(255,255,255,0.1);
 }
 
-.delete-btn-link {
-    background: transparent;
-    border: none;
+.danger-btn {
+    background: rgba(255, 69, 58, 0.1);
     color: #ff453a;
-    font-size: 0.9rem;
-    margin-right: 1.5rem;
-    cursor: pointer;
-    opacity: 0.7;
-    transition: opacity 0.2s;
+    border: 1px solid rgba(255, 69, 58, 0.2);
+    margin-right: 1rem;
+    font-size: 0.85rem;
+    padding: 0.5rem 1rem;
 }
 
-.delete-btn-link:hover {
-    opacity: 1;
-    text-decoration: underline;
+.danger-btn:hover {
+    background: #ff453a;
+    color: white;
+    box-shadow: 0 4px 12px rgba(255, 69, 58, 0.3);
+}
+
+.btn-icon {
+    margin-right: 0.5rem;
 }
 
 .detail-actions {
