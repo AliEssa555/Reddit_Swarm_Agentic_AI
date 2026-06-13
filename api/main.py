@@ -31,6 +31,10 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     query: str
 
+class CategoryCreate(BaseModel):
+    name: str
+    description: str = ""
+
 @app.post("/api/ask")
 async def ask_live_swarm_endpoint(req: QueryRequest):
     """Synchronous endpoint triggering the entire live web scraping architecture on-demand!"""
@@ -65,6 +69,58 @@ async def get_topics():
         })
     db.close()
     return results
+
+@app.post("/api/category")
+async def create_category(req: CategoryCreate):
+    db = SessionLocal()
+    # Check if exists
+    existing = db.query(TopicCategory).filter(TopicCategory.name == req.name).first()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=400, detail="Category already exists")
+    
+    new_cat = TopicCategory(name=req.name, description=req.description)
+    db.add(new_cat)
+    db.commit()
+    db.refresh(new_cat)
+    
+    # Create a default "General" topic so scraping and analysis have a target
+    default_topic = Topic(name="General", description=f"General posts for {req.name}", category_id=new_cat.id)
+    db.add(default_topic)
+    db.commit()
+    
+    cat_id = new_cat.id
+    cat_name = new_cat.name
+    db.close()
+    return {"id": cat_id, "name": cat_name, "message": "Category created successfully with default topic."}
+
+@app.delete("/api/category/{category_id}")
+async def delete_category(category_id: int):
+    db = SessionLocal()
+    cat = db.query(TopicCategory).filter(TopicCategory.id == category_id).first()
+    if not cat:
+        db.close()
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    # 1. Find all topics in this category
+    topics = db.query(Topic).filter(Topic.category_id == category_id).all()
+    topic_ids = [t.id for t in topics]
+    
+    # 2. Delete associated BrightData data (Comments first for FK)
+    # BrightDataComment doesn't have a direct topic_id, but it has post_reddit_id
+    posts = db.query(BrightDataPost).filter(BrightDataPost.topic_id.in_(topic_ids)).all()
+    post_reddit_ids = [p.reddit_id for p in posts]
+    
+    db.query(BrightDataComment).filter(BrightDataComment.post_reddit_id.in_(post_reddit_ids)).delete(synchronize_session=False)
+    db.query(BrightDataPost).filter(BrightDataPost.topic_id.in_(topic_ids)).delete(synchronize_session=False)
+    
+    # 3. Delete normal posts/topics
+    db.query(Topic).filter(Topic.category_id == category_id).delete(synchronize_session=False)
+    db.query(TopicCategory).filter(TopicCategory.id == category_id).delete(synchronize_session=False)
+    
+    db.commit()
+    db.close()
+    return {"message": f"Category '{cat.name}' and all associated data deleted successfully."}
 
 @app.get("/api/history")
 async def get_history():
@@ -185,6 +241,11 @@ async def batch_scrape_category(req: ScrapeRequest):
     }
     
     print(f"[SCRAPE] Starting batch scrape for '{cat.name}' ({req.num_posts} posts, filter: {req.time_filter})")
+    
+    # Identify a target topic for association (default to the first one found)
+    target_topic = db.query(Topic).filter(Topic.category_id == cat.id).first()
+    target_topic_id = target_topic.id if target_topic else None
+    
     scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=2400)
     for msg in log:
         print(f"[BRIGHTDATA] {msg}")
@@ -217,7 +278,7 @@ async def batch_scrape_category(req: ScrapeRequest):
                     body=(item.get("description") or ""),
                     author=item.get("user_posted", "unknown"),
                     score=item.get("num_upvotes", 0),
-                    topic_id=None # We could parse topic here using determine_topic
+                    topic_id=target_topic_id
                 )
                 db.add(new_post)
         

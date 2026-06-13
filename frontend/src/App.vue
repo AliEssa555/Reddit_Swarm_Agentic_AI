@@ -80,14 +80,20 @@
       <!-- Topic Hierarchy View -->
       <section v-if="currentView === 'topics'" class="view-section topics-view">
         <div class="view-header">
-          <h2>Topic Analytics & Scraping</h2>
-          <p>Explore autonomous taxonomy or trigger targeted Swarm Scraping</p>
+          <div class="header-main">
+            <h2>Topic Analytics & Scraping</h2>
+            <p>Explore autonomous taxonomy or trigger targeted Swarm Scraping</p>
+          </div>
+          <button v-if="!selectedCategory" class="action-btn create-btn" @click="showCreateModal = true">+ Create Category</button>
         </div>
         
         <div v-if="selectedCategory" class="category-detail glass-panel">
           <div class="detail-header">
             <h3>{{ selectedCategory.name }} <span class="badge">Deep Dive</span></h3>
-            <button class="back-btn" @click="selectedCategory = null">← Back to Overview</button>
+            <div class="detail-actions">
+              <button class="delete-btn-link" @click="confirmDelete(selectedCategory)">Delete Category</button>
+              <button class="back-btn" @click="selectedCategory = null">← Back to Overview</button>
+            </div>
           </div>
           
           <div class="tabs">
@@ -173,11 +179,39 @@
               <h4>{{ cat.name }}</h4>
             </div>
             <ul class="topic-list">
-              <li v-for="top in cat.topics.slice(0, 5)" :key="top.id">
+              <li v-for="top in cat.topics.slice(0, 5)" :key="top.id" class="topic-item">
                 <span class="dot"></span> {{ top.name }}
               </li>
               <li v-if="cat.topics.length > 5" class="more">+{{ cat.topics.length - 5 }} more topics</li>
             </ul>
+          </div>
+        </div>
+
+        <!-- Create Category Modal -->
+        <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
+          <div class="modal-content glass-panel">
+            <div class="modal-header">
+              <h3>Create New Category</h3>
+              <button class="close-btn" @click="showCreateModal = false">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="form-group">
+                <label>Category Name</label>
+                <input v-model="newCategory.name" placeholder="e.g. Cybersecurity, Space Tech..." />
+              </div>
+              <div class="form-group" style="margin-top: 1rem;">
+                <label>Description (Optional)</label>
+                <textarea v-model="newCategory.description" placeholder="What is this category about?"></textarea>
+              </div>
+              <div v-if="createError" class="error-text">{{ createError }}</div>
+            </div>
+            <div class="modal-footer">
+              <button class="nav-item" @click="showCreateModal = false">Cancel</button>
+              <button class="action-btn" :disabled="!newCategory.name" @click="createCategory">
+                <span v-if="isCreating">Creating...</span>
+                <span v-else>Create Category</span>
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -233,9 +267,37 @@ const activeTab = ref('analysis');
 const isAnalyzing = ref(false);
 const categoryAnalysis = ref('');
 const scrapeForm = ref({ num_posts: 100, num_comments: 10, time_filter: 'Past month' });
-const isScraping = ref(false);
-const scrapeMessage = ref('');
 const scrapeResult = ref(null);
+
+// Create Category Modal State
+const showCreateModal = ref(false);
+const isCreating = ref(false);
+const createError = ref('');
+const newCategory = ref({ name: '', description: '' });
+
+const createCategory = async () => {
+    if (!newCategory.value.name) return;
+    isCreating.value = true;
+    createError.value = '';
+    try {
+        const res = await fetch(`http://localhost:8000/api/category`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newCategory.value)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Failed to create category');
+        
+        // Success
+        await fetchData(); // Refresh list
+        showCreateModal.value = false;
+        newCategory.value = { name: '', description: '' };
+    } catch (e) {
+        createError.value = e.message;
+    } finally {
+        isCreating.value = false;
+    }
+};
 
 const formattedAnalysis = computed(() => {
     return categoryAnalysis.value ? marked(categoryAnalysis.value) : '';
@@ -413,6 +475,23 @@ const askSwarm = async () => {
         messages.value.push({ id: Date.now()+2, role: "Error", text: "Connection failure: " + e.message });
     } finally {
         isLoading.value = false;
+    }
+};
+
+const confirmDelete = async (cat) => {
+    if (confirm(`Are you sure you want to delete '${cat.name}'? This will remove all associated scrapes and analysis results forever.`)) {
+        try {
+            const res = await fetch(`http://localhost:8000/api/category/${cat.id}`, {
+                method: 'DELETE'
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Delete failed');
+            
+            selectedCategory.value = null;
+            await fetchData();
+        } catch (e) {
+            alert("Error deleting category: " + e.message);
+        }
     }
 };
 </script>
@@ -759,6 +838,27 @@ nav button.active {
     background: rgba(255,255,255,0.1);
 }
 
+.delete-btn-link {
+    background: transparent;
+    border: none;
+    color: #ff453a;
+    font-size: 0.9rem;
+    margin-right: 1.5rem;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.delete-btn-link:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+.detail-actions {
+    display: flex;
+    align-items: center;
+}
+
 .tabs {
     display: flex;
     gap: 1rem;
@@ -1008,5 +1108,90 @@ summary { cursor: pointer; color: #4facfe; font-size: 0.9rem; }
 @keyframes rotation {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+/* Modal Styles */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.8);
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    animation: fadeIn 0.2s ease-out;
+}
+
+.modal-content {
+    width: 100%;
+    max-width: 500px;
+    padding: 2rem;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2rem;
+}
+
+.modal-header h3 { margin: 0; font-size: 1.4rem; }
+
+.close-btn {
+    background: none;
+    border: none;
+    color: #8b949e;
+    font-size: 2rem;
+    cursor: pointer;
+}
+
+.modal-body {
+    margin-bottom: 2rem;
+}
+
+.modal-body textarea {
+    width: 100%;
+    height: 100px;
+    padding: 0.8rem;
+    background: #161b22;
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #e6edf3;
+    border-radius: 6px;
+    resize: none;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 1rem;
+}
+
+.modal-footer .action-btn {
+    grid-column: auto;
+    min-width: 150px;
+}
+
+.error-text {
+    color: #ff453a;
+    font-size: 0.85rem;
+    margin-top: 0.8rem;
+}
+
+.view-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2.5rem;
+}
+
+.create-btn {
+    grid-column: auto;
+    padding: 0.6rem 1.2rem;
+    font-size: 0.9rem;
 }
 </style>
