@@ -394,6 +394,17 @@ const extractSubtopics = async () => {
                         maintainAspectRatio: false,
                         plugins: {
                             legend: { labels: { color: '#e6edf3' }, position: 'right' }
+                        },
+                        onClick: (e, elements) => {
+                            if (elements.length > 0) {
+                                const index = elements[0].index;
+                                const subtopicName = data.labels[index];
+                                currentView.value = 'swarm';
+                                userQuery.value = `Can you deeply analyze the subtopic "${subtopicName}" within the "${selectedCategory.value.name}" category using recent Reddit posts? Explain the general sentiment and key points.`;
+                                nextTick(() => {
+                                    askSwarm();
+                                });
+                            }
                         }
                     }
                 });
