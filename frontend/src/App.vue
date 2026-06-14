@@ -119,12 +119,31 @@
           </div>
           
           <div v-show="activeTab === 'charts'" class="tab-content">
-            <p>Subtopic Post Distribution within <strong>{{ selectedCategory.name }}</strong></p>
-            <div class="chart-container" style="position: relative; height:400px; width:100%; margin-top: 1.5rem; background: rgba(0,0,0,0.2) padding: 1rem; border-radius: 8px;">
-              <canvas ref="chartCanvas"></canvas>
-            </div>
-            <div class="chart-filters" style="margin-top: 1rem; display: flex; justify-content: flex-end;">
-               <button class="action-btn small" @click="loadCharts">Refresh Data</button>
+            <div class="charts-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;">
+              <div class="chart-section">
+                <p>Subtopic Post Distribution within <strong>{{ selectedCategory.name }}</strong></p>
+                <div class="chart-container" style="position: relative; height:300px; width:100%; margin-top: 1.5rem; background: rgba(0,0,0,0.2) padding: 1rem; border-radius: 8px;">
+                  <canvas ref="chartCanvas"></canvas>
+                </div>
+                <div class="chart-filters" style="margin-top: 1rem; display: flex; justify-content: flex-end;">
+                   <button class="action-btn small" @click="loadCharts">Refresh Structural Data</button>
+                </div>
+              </div>
+              
+              <div class="chart-section">
+                <p>AI Subtopic Extraction</p>
+                <div class="chart-container" style="position: relative; height:300px; width:100%; margin-top: 1.5rem; background: rgba(0,0,0,0.2) padding: 1rem; border-radius: 8px; display: flex; justify-content: center; align-items: center;">
+                  <canvas ref="pieChartCanvas" v-show="!isExtractingSubtopics && hasExtractedData"></canvas>
+                  <p v-if="isExtractingSubtopics" class="loading-state">Analyzing posts and extracting subtopics...</p>
+                  <p v-if="!isExtractingSubtopics && !hasExtractedData" style="color: #8b949e; text-align: center;">Click below to extract dynamic subtopics via AI.</p>
+                </div>
+                <div class="chart-filters" style="margin-top: 1rem; display: flex; justify-content: flex-end;">
+                   <button class="action-btn small highlight-btn" @click="extractSubtopics" :disabled="isExtractingSubtopics">
+                     <span v-if="isExtractingSubtopics">Extracting...</span>
+                     <span v-else>Extract Subtopics (AI)</span>
+                   </button>
+                </div>
+              </div>
             </div>
           </div>
           
@@ -344,6 +363,49 @@ const loadCharts = async () => {
     }
 };
 
+const pieChartCanvas = ref(null);
+let pieChartInstance = null;
+const isExtractingSubtopics = ref(false);
+const hasExtractedData = ref(false);
+
+const extractSubtopics = async () => {
+    if (!selectedCategory.value) return;
+    isExtractingSubtopics.value = true;
+    hasExtractedData.value = false;
+    
+    try {
+        const res = await fetch(`http://localhost:8000/api/category/${selectedCategory.value.id}/subtopics`);
+        const data = await res.json();
+        
+        if (data.error) throw new Error(data.error);
+
+        hasExtractedData.value = true;
+
+        nextTick(() => {
+            if (pieChartInstance) {
+                pieChartInstance.destroy();
+            }
+            if (pieChartCanvas.value) {
+                pieChartInstance = new Chart(pieChartCanvas.value, {
+                    type: 'pie',
+                    data: data,
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { labels: { color: '#e6edf3' }, position: 'right' }
+                        }
+                    }
+                });
+            }
+        });
+    } catch (e) {
+        alert("Subtopic extraction failed: " + e.message);
+    } finally {
+        isExtractingSubtopics.value = false;
+    }
+};
+
 watch(activeTab, (newTab) => {
     if (newTab === 'charts') {
         loadCharts();
@@ -391,6 +453,12 @@ const selectCategory = async (cat) => {
     categoryAnalysis.value = '';
     isAnalyzing.value = false;
     scrapeMessage.value = '';
+    // Reset pie chart state
+    hasExtractedData.value = false;
+    if (pieChartInstance) {
+        pieChartInstance.destroy();
+        pieChartInstance = null;
+    }
 };
 
 const generateAnalysis = async () => {
@@ -692,6 +760,36 @@ nav button.active {
 }
 
 .message-content p { margin: 0; line-height: 1.5; }
+
+.action-btn {
+    background: #238636;
+    color: white;
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    padding: 0.8rem 1.5rem;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, box-shadow 0.2s;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.action-btn:hover {
+    background: #2ea043;
+    box-shadow: 0 4px 15px rgba(46, 160, 67, 0.4);
+}
+
+.highlight-btn {
+    background: #8957e5;
+}
+
+.highlight-btn:hover {
+    background: #9d6cfe;
+    box-shadow: 0 4px 15px rgba(137, 87, 229, 0.4);
+}
 
 .input-area {
     padding: 1.5rem;

@@ -194,7 +194,16 @@ def database_writer_node(state: LiveSwarmState):
                 
         for item in state.get("raw_scraped_comments", []):
             comment_id = str(item.get("comment_id", ""))
-            post_id = str(item.get("post_id", ""))
+            
+            raw_pid = item.get("post_id")
+            if raw_pid is None:
+                # Try to extract from URL if BrightData didn't provide post_id
+                post_url = item.get("url", "")
+                if "/comments/" in post_url:
+                    raw_pid = post_url.split("/comments/")[1].split("/")[0]
+                    
+            post_id = str(raw_pid) if raw_pid else None
+            
             if not db.query(BrightDataComment).filter(BrightDataComment.comment_id == comment_id).first():
                 new_com = BrightDataComment(
                     comment_id=comment_id,

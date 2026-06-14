@@ -14,6 +14,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from config import BRIGHTDATA_API_KEY
 import config
+import json
 
 # Ensure all tables (including BrightData ones) are created in Postgres on startup
 Base.metadata.create_all(bind=engine)
@@ -183,6 +184,66 @@ async def analyze_category(category_id: int):
     except Exception as e:
         return {"response": f"LLM Error: {e}"}
 
+@app.get("/api/category/{category_id}/subtopics")
+async def extract_subtopics(category_id: int):
+    """Uses LLM to analyze category posts and extract structured subtopics for a Pie Chart."""
+    db = SessionLocal()
+    cat = db.query(TopicCategory).filter(TopicCategory.id == category_id).first()
+    if not cat:
+        db.close()
+        return {"error": "Category not found."}
+        
+    topics = db.query(Topic).filter(Topic.category_id == cat.id).all()
+    topic_ids = [t.id for t in topics]
+    
+    posts = db.query(Post).filter(Post.topic_id.in_(topic_ids)).limit(30).all()
+    bd_posts = db.query(BrightDataPost).filter(BrightDataPost.topic_id.in_(topic_ids)).limit(30).all()
+    
+    all_posts = posts + bd_posts
+    
+    if len(all_posts) == 0:
+        db.close()
+        return {"error": "Not enough data available to extract subtopics."}
+        
+    context_str = "\n".join([f"- {post.title}" for post in all_posts[:30]])
+    db.close()
+    
+    llm = get_llm()
+    prompt = ChatPromptTemplate.from_template(
+        "You are an analytical AI categorizer. Based on the following post titles in the '{category_name}' category, group them into 3 to 6 distinct subtopics.\n\n"
+        "Post Titles:\n{context}\n\n"
+        "Return the result STRICTLY as a raw JSON object where keys are the subtopic names (strings) and values are the estimated number of posts belonging to that subtopic (integers).\n"
+        "Do NOT include any markdown formatting, backticks, or other text. Just the raw JSON object.\n"
+        "Example:\n{{\"Server Config\": 5, \"Networking\": 2}}"
+    )
+    chain = prompt | llm | StrOutputParser()
+    try:
+        response = chain.invoke({"category_name": cat.name, "context": context_str})
+        response = response.strip()
+        if response.startswith("```json"):
+            response = response[7:]
+        if response.startswith("```"):
+            response = response[3:]
+        if response.endswith("```"):
+            response = response[:-3]
+        response = response.strip()
+        
+        data = json.loads(response)
+        
+        labels = list(data.keys())
+        counts = list(data.values())
+        
+        return {
+            "labels": labels,
+            "datasets": [{
+                "label": "Subtopics",
+                "data": counts,
+                "backgroundColor": ["#ff6384", "#36a2eb", "#cc65fe", "#ffce56", "#4bc0c0", "#9966ff"]
+            }]
+        }
+    except Exception as e:
+        return {"error": f"LLM parsing error. Could not extract valid subtopics. Details: {e}"}
+
 @app.get("/api/category/{category_id}/metrics")
 async def category_metrics(category_id: int):
     """Returns post counts per subtopic for visualizations."""
@@ -286,8 +347,17 @@ async def batch_scrape_category(req: ScrapeRequest):
         
         for item in scraped_comments:
             comment_id = str(item.get("comment_id", ""))
-            post_id = str(item.get("post_id", ""))
-            if not db.query(BrightDataComment).filter(BrightDataComment.comment_id == comment_id).first():
+            
+            raw_pid = item.get("post_id")
+            if raw_pid is None:
+                # Try to extract from URL if BrightData didn't provide post_id
+                post_url = item.get("url", "")
+                if "/comments/" in post_url:
+                    raw_pid = post_url.split("/comments/")[1].split("/")[0]
+                    
+            post_id = str(raw_pid) if raw_pid else None
+            
+            if not db.query(BrightDataComment).filter(BrightDataComment.comment_id ==comment_id).first():
                 new_com = BrightDataComment(
                     comment_id=comment_id,
                     post_reddit_id=post_id,
