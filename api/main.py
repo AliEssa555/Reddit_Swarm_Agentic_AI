@@ -35,23 +35,40 @@ class QueryRequest(BaseModel):
 class CategoryCreate(BaseModel):
     name: str
     description: str = ""
+    subtopics: str = ""
 
 @app.post("/api/ask")
-async def ask_live_swarm_endpoint(req: QueryRequest):
-    """Synchronous endpoint triggering the entire live web scraping architecture on-demand!"""
+async def ask_db_swarm_endpoint(req: QueryRequest):
+    """Synchronous endpoint triggering the Database QA Text-to-SQL architecture."""
     print(f"\n[USER INITIATED]: {req.query}")
     
-    result = live_swarm.invoke({
+    from agents.sql_swarm import sql_swarm
+    
+    result = sql_swarm.invoke({
         "original_query": req.query,
-        "search_keyword": "",
-        "raw_scraped_data": [],
-        "final_response": "",
-        "log_messages": []
+        "extracted_json": "",
+        "generated_sql": "",
+        "raw_db_results": "",
+        "final_summary": "",
+        "error": ""
     })
     
+    # Format the log messages for the UI
+    result_rows = result.get('raw_db_results', '')
+    row_count = len(result_rows.splitlines()) - 1 if "No rows returned" not in result_rows and result_rows else 0
+    
+    logs = [
+        f"EXTRACTOR (JSON Topics): {result.get('extracted_json', 'None')}",
+        f"SQL GENERATOR: {result.get('generated_sql', 'None')}",
+        f"DB EXECUTOR: {row_count} rows fetched and fed to Synthesizer."
+    ]
+    
+    if result.get("error"):
+        logs.append(f"ERROR: {result.get('error')}")
+        
     return {
-        "response": result.get("final_response"),
-        "logs": result.get("log_messages", [])
+        "response": result.get("final_summary", "No final response generated."),
+        "logs": logs
     }
 
 @app.get("/api/topics")
@@ -85,9 +102,17 @@ async def create_category(req: CategoryCreate):
     db.commit()
     db.refresh(new_cat)
     
-    # Create a default "General" topic so scraping and analysis have a target
-    default_topic = Topic(name="General", description=f"General posts for {req.name}", category_id=new_cat.id)
-    db.add(default_topic)
+    # Process user-defined subtopics or default to 'General'
+    if req.subtopics.strip():
+        subtopics_list = [s.strip() for s in req.subtopics.split(',') if s.strip()]
+        for sub in subtopics_list:
+            new_topic = Topic(name=sub, description=f"Initial topic: {sub}", category_id=new_cat.id)
+            db.add(new_topic)
+    else:
+        # Create a default "General" topic so scraping and analysis have a target
+        default_topic = Topic(name="General", description=f"General posts for {req.name}", category_id=new_cat.id)
+        db.add(default_topic)
+        
     db.commit()
     
     cat_id = new_cat.id

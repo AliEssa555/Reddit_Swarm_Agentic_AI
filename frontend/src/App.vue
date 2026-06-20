@@ -224,6 +224,10 @@
                 <label>Description (Optional)</label>
                 <textarea v-model="newCategory.description" placeholder="What is this category about?"></textarea>
               </div>
+              <div class="form-group" style="margin-top: 1rem;">
+                <label>Initial Subtopics (Optional)</label>
+                <input v-model="newCategory.subtopics" placeholder="Comma separated: eg. hardware, software, services" />
+              </div>
               <div v-if="createError" class="error-text">{{ createError }}</div>
             </div>
             <div class="modal-footer">
@@ -295,7 +299,7 @@ const scrapeResult = ref(null);
 const showCreateModal = ref(false);
 const isCreating = ref(false);
 const createError = ref('');
-const newCategory = ref({ name: '', description: '' });
+const newCategory = ref({ name: '', description: '', subtopics: '' });
 
 const createCategory = async () => {
     if (!newCategory.value.name) return;
@@ -313,7 +317,7 @@ const createCategory = async () => {
         // Success
         await fetchData(); // Refresh list
         showCreateModal.value = false;
-        newCategory.value = { name: '', description: '' };
+        newCategory.value = { name: '', description: '', subtopics: '' };
     } catch (e) {
         createError.value = e.message;
     } finally {
