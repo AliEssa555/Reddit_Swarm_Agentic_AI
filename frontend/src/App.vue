@@ -306,7 +306,7 @@ const createCategory = async () => {
     isCreating.value = true;
     createError.value = '';
     try {
-        const res = await fetch(`http://localhost:8000/api/category`, {
+        const res = await fetch(`/api/category`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(newCategory.value)
@@ -335,7 +335,7 @@ let chartInstance = null;
 const loadCharts = async () => {
     if (!selectedCategory.value) return;
     try {
-        const res = await fetch(`http://localhost:8000/api/category/${selectedCategory.value.id}/metrics`);
+        const res = await fetch(`/api/category/${selectedCategory.value.id}/metrics`);
         const data = await res.json();
         
         if (data.error) throw new Error(data.error);
@@ -378,7 +378,7 @@ const extractSubtopics = async () => {
     hasExtractedData.value = false;
     
     try {
-        const res = await fetch(`http://localhost:8000/api/category/${selectedCategory.value.id}/subtopics`);
+        const res = await fetch(`/api/category/${selectedCategory.value.id}/subtopics`);
         const data = await res.json();
         
         if (data.error) throw new Error(data.error);
@@ -443,8 +443,8 @@ const scrollToBottom = () => {
 const fetchData = async () => {
     try {
         const [topicsRes, historyRes] = await Promise.all([
-            fetch('http://localhost:8000/api/topics'),
-            fetch('http://localhost:8000/api/history')
+            fetch('/api/topics'),
+            fetch('/api/history')
         ]);
         categories.value = await topicsRes.json();
         history.value = await historyRes.json();
@@ -481,7 +481,7 @@ const generateAnalysis = async () => {
     isAnalyzing.value = true;
     categoryAnalysis.value = '';
     try {
-        const res = await fetch(`http://localhost:8000/api/category/${selectedCategory.value.id}/analysis`);
+        const res = await fetch(`/api/category/${selectedCategory.value.id}/analysis`);
         const data = await res.json();
         categoryAnalysis.value = data.response || data.error;
     } catch (e) {
@@ -504,7 +504,7 @@ const submitScrape = async () => {
     };
     
     try {
-        const res = await fetch('http://localhost:8000/api/category/scrape', {
+        const res = await fetch('/api/category/scrape', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(payload)
@@ -538,7 +538,7 @@ const askSwarm = async () => {
     scrollToBottom();
 
     try {
-        const response = await fetch('http://localhost:8000/api/ask', {
+        const response = await fetch('/api/ask', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({query: currentQ})
@@ -568,7 +568,7 @@ const askSwarm = async () => {
 const confirmDelete = async (cat) => {
     if (confirm(`Are you sure you want to delete '${cat.name}'? This will remove all associated scrapes and analysis results forever.`)) {
         try {
-            const res = await fetch(`http://localhost:8000/api/category/${cat.id}`, {
+            const res = await fetch(`/api/category/${cat.id}`, {
                 method: 'DELETE'
             });
             const data = await res.json();
