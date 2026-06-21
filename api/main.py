@@ -120,6 +120,183 @@ async def create_category(req: CategoryCreate):
     db.close()
     return {"id": cat_id, "name": cat_name, "message": "Category created successfully with default topic."}
 
+class BatchCategoryItem(BaseModel):
+    name: str
+    description: str = ""
+    subtopics: str = ""  # Comma-separated
+
+class BatchCategoryCreate(BaseModel):
+    categories: list[BatchCategoryItem]
+    # Scrape settings applied to all categories
+    num_posts: int = 50
+    num_comments: int = 5
+    time_filter: str = "Past month"
+
+@app.post("/api/batch-categories")
+async def batch_create_categories(req: BatchCategoryCreate):
+    """
+    Batch create multiple categories (with subtopics) and immediately scrape
+    BrightData for each one sequentially.
+
+    Postman Body (JSON):
+    {
+        "num_posts": 30,
+        "num_comments": 5,
+        "time_filter": "Past month",
+        "categories": [
+            {"name": "AI & ML", "subtopics": "LLMs, Computer Vision, NLP"},
+            {"name": "Geopolitics", "subtopics": "Middle East, Eastern Europe"},
+            {"name": "Climate", "subtopics": ""}
+        ]
+    }
+    """
+    headers = {
+        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    url_posts = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvz8ah06191smkebj4&notify=false&include_errors=true&type=discover_new&discover_by=keyword"
+    url_comments = "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lvzdpsdlw09j6t702&notify=false&include_errors=true"
+
+    results = []
+    skipped = []
+
+    for item in req.categories:
+        db = SessionLocal()
+        try:
+            # --- Step 1: Create category if not exists ---
+            existing = db.query(TopicCategory).filter(TopicCategory.name == item.name).first()
+            if existing:
+                skipped.append(item.name)
+                db.close()
+                continue
+
+            new_cat = TopicCategory(name=item.name, description=item.description)
+            db.add(new_cat)
+            db.commit()
+            db.refresh(new_cat)
+
+            subtopic_names = []
+            if item.subtopics.strip():
+                subtopics_list = [s.strip() for s in item.subtopics.split(',') if s.strip()]
+                for sub in subtopics_list:
+                    db.add(Topic(name=sub, description=f"Initial topic: {sub}", category_id=new_cat.id))
+                    subtopic_names.append(sub)
+            else:
+                db.add(Topic(name="General", description=f"General posts for {item.name}", category_id=new_cat.id))
+                subtopic_names.append("General")
+
+            db.commit()
+
+            cat_id = new_cat.id
+            cat_name = new_cat.name
+            target_topic = db.query(Topic).filter(Topic.category_id == cat_id).first()
+            target_topic_id = target_topic.id if target_topic else None
+            db.close()
+
+            print(f"\n[BATCH SCRAPE] Starting scrape for '{cat_name}' ({req.num_posts} posts)")
+
+            # --- Step 2: Scrape posts ---
+            log = []
+            payload_posts = {
+                "input": [{"keyword": cat_name, "date": req.time_filter, "num_of_posts": req.num_posts}]
+            }
+            scraped_posts = _post_brightdata(url_posts, headers, payload_posts, log, timeout=2400)
+            for msg in log:
+                print(f"  [BD-POSTS] {msg}")
+            log.clear()
+
+            posts_saved = 0
+            comments_saved = 0
+            scraped_comments = []
+
+            if scraped_posts:
+                # --- Step 3: Scrape comments for top posts ---
+                if req.num_comments > 0:
+                    comments_input = [
+                        {"url": p.get("url"), "days_back": 180, "load_all_replies": False, "comment_limit": req.num_comments}
+                        for p in scraped_posts[:3] if p.get("url")
+                    ]
+                    if comments_input:
+                        scraped_comments = _post_brightdata(url_comments, headers, {"input": comments_input}, log, timeout=2400)
+                        for msg in log:
+                            print(f"  [BD-COMMENTS] {msg}")
+
+                # --- Step 4: Save to DB ---
+                db2 = SessionLocal()
+                try:
+                    from db.models import BrightDataPost, BrightDataComment
+                    import re as _re
+
+                    for post_item in scraped_posts:
+                        reddit_id = post_item.get("id")
+                        if not reddit_id or str(reddit_id).lower() in ("none", "null", ""):
+                            url_val = post_item.get("url", "")
+                            match = _re.search(r'/comments/([a-z0-9]+)', url_val)
+                            reddit_id = match.group(1) if match else None
+                        if not reddit_id:
+                            continue
+
+                        existing_post = db2.query(BrightDataPost).filter(BrightDataPost.reddit_id == str(reddit_id)).first()
+                        if existing_post:
+                            continue
+
+                        db2.add(BrightDataPost(
+                            reddit_id=str(reddit_id),
+                            title=post_item.get("title", ""),
+                            url=post_item.get("url", ""),
+                            body=post_item.get("body", ""),
+                            author=post_item.get("author", ""),
+                            score=int(post_item.get("score", 0) or 0),
+                            num_comments=int(post_item.get("num_comments", 0) or 0),
+                            topic_id=target_topic_id,
+                            snapshot_id=post_item.get("snapshot_id", "batch")
+                        ))
+                        posts_saved += 1
+
+                    for c in (scraped_comments or []):
+                        post_rid = c.get("post_id") or c.get("post_reddit_id")
+                        if not post_rid or str(post_rid).lower() in ("none", "null", ""):
+                            post_url = c.get("post_url", "")
+                            match = _re.search(r'/comments/([a-z0-9]+)', post_url)
+                            post_rid = match.group(1) if match else None
+
+                        db2.add(BrightDataComment(
+                            comment_id=c.get("id", ""),
+                            post_reddit_id=str(post_rid) if post_rid else None,
+                            body=c.get("body", ""),
+                            author=c.get("author", ""),
+                            score=int(c.get("score", 0) or 0),
+                            snapshot_id="batch"
+                        ))
+                        comments_saved += 1
+
+                    db2.commit()
+                finally:
+                    db2.close()
+
+            results.append({
+                "name": cat_name,
+                "id": cat_id,
+                "subtopics": subtopic_names,
+                "posts_scraped": posts_saved,
+                "comments_scraped": comments_saved
+            })
+            print(f"[BATCH DONE] '{cat_name}': {posts_saved} posts, {comments_saved} comments saved.")
+
+        except Exception as e:
+            print(f"[BATCH ERROR] Failed for '{item.name}': {e}")
+            results.append({"name": item.name, "error": str(e)})
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    return {
+        "results": results,
+        "skipped_duplicates": skipped,
+        "summary": f"{len(results)} categories processed, {len(skipped)} skipped as duplicates."
+    }
+
 @app.delete("/api/category/{category_id}")
 async def delete_category(category_id: int):
     db = SessionLocal()
