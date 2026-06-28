@@ -15,6 +15,7 @@ services:
     environment:
       - POSTGRES_URL=postgresql://postgres:ali@postgres:5432/reddit_swarm
       - BRIGHTDATA_API_KEY=${BRIGHTDATA_API_KEY}
+      - ADMIN_LOCKED=${ADMIN_LOCKED:-false}
     ports:
       - "8000:8000"
     depends_on:

@@ -17,3 +17,6 @@ BRIGHTDATA_API_KEY = os.getenv('BRIGHTDATA_API_KEY', '')
 # Since you need a public URL for Webhooks:
 # Set up an ngrok URL (e.g. https://xyz.ngrok.app/webhook/reddit) or a webhook.site testing URL
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://webhook.site/temp-url-here/webhook/reddit')
+
+# Admin lock mode to prevent unauthorized creates/writes in production
+ADMIN_LOCKED = os.getenv('ADMIN_LOCKED', 'false').lower() == 'true'

@@ -53,7 +53,11 @@
             </div>
           </div>
           
-          <div class="input-area">
+          <div v-if="adminLocked" class="admin-locked-banner" style="text-align:center; padding: 2rem; color:#ff7b72; background: rgba(255, 123, 114, 0.1); border-radius: 8px; margin: 1rem;">
+            <span style="font-size: 2rem;">🔒</span>
+            <p style="margin-top: 0.5rem; font-weight: 600;">Administrator access required to access this feature</p>
+          </div>
+          <div v-else class="input-area">
             <input 
               v-model="userQuery" 
               @keyup.enter="askSwarm" 
@@ -84,7 +88,7 @@
             <h2>Topic Analytics & Scraping</h2>
             <p>Explore autonomous taxonomy or trigger targeted Swarm Scraping</p>
           </div>
-          <button v-if="!selectedCategory" class="action-btn create-btn" @click="showCreateModal = true">+ Create Category</button>
+          <button v-if="!selectedCategory && !adminLocked" class="action-btn create-btn" @click="showCreateModal = true">+ Create Category</button>
         </div>
         
         <div v-if="selectedCategory" class="category-detail glass-panel">
@@ -278,6 +282,7 @@ import { Chart, registerables } from 'chart.js';
 Chart.register(...registerables);
 
 const currentView = ref('swarm');
+const adminLocked = ref(false);
 const messages = ref([{ id: 1, role: "System", text: "Swarm initialized. Ready for real-time Reddit analysis." }]);
 const userQuery = ref('');
 const lastEval = ref(null);
@@ -442,12 +447,15 @@ const scrollToBottom = () => {
 
 const fetchData = async () => {
     try {
-        const [topicsRes, historyRes] = await Promise.all([
+        const [topicsRes, historyRes, configRes] = await Promise.all([
             fetch('/api/topics'),
-            fetch('/api/history')
+            fetch('/api/history'),
+            fetch('/api/config')
         ]);
         categories.value = await topicsRes.json();
         history.value = await historyRes.json();
+        const configData = await configRes.json();
+        adminLocked.value = configData.adminLocked;
     } catch (e) {
         console.error("Failed to fetch dashboard data:", e);
     }

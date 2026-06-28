@@ -19,7 +19,12 @@ import json
 # Ensure all tables (including BrightData ones) are created in Postgres on startup
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Reddit Swarm Dashboard API")
+app = FastAPI(title="Reddit QA Swarm API")
+
+@app.get("/api/config")
+async def get_system_config():
+    """Expose essential environment settings to the frontend."""
+    return {"adminLocked": config.ADMIN_LOCKED}
 
 # Setup CORS to allow Vue UI communication locally seamlessly
 app.add_middleware(
@@ -40,6 +45,9 @@ class CategoryCreate(BaseModel):
 @app.post("/api/ask")
 async def ask_db_swarm_endpoint(req: QueryRequest):
     """Synchronous endpoint triggering the Database QA Text-to-SQL architecture."""
+    if config.ADMIN_LOCKED:
+        raise HTTPException(status_code=403, detail="Administrator access required to access this feature")
+        
     print(f"\n[USER INITIATED]: {req.query}")
     
     from agents.sql_swarm import sql_swarm
@@ -90,6 +98,9 @@ async def get_topics():
 
 @app.post("/api/category")
 async def create_category(req: CategoryCreate):
+    if config.ADMIN_LOCKED:
+        raise HTTPException(status_code=403, detail="Administrator access required to access this feature")
+        
     db = SessionLocal()
     # Check if exists
     existing = db.query(TopicCategory).filter(TopicCategory.name == req.name).first()
@@ -150,6 +161,9 @@ async def batch_create_categories(req: BatchCategoryCreate):
         ]
     }
     """
+    if config.ADMIN_LOCKED:
+        raise HTTPException(status_code=403, detail="Administrator access required to access this feature")
+        
     headers = {
         "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
         "Content-Type": "application/json"
@@ -251,7 +265,7 @@ async def batch_create_categories(req: BatchCategoryCreate):
                         ))
                         posts_saved += 1
 
-                                        for c in (scraped_comments or []):
+                    for c in (scraped_comments or []):
                         post_rid = c.get("post_id") or c.get("post_reddit_id")
                         if not post_rid or str(post_rid).lower() in ("none", "null", ""):
                             post_url = c.get("post_url", "")
@@ -310,6 +324,9 @@ async def batch_create_categories(req: BatchCategoryCreate):
 
 @app.delete("/api/category/{category_id}")
 async def delete_category(category_id: int):
+    if config.ADMIN_LOCKED:
+        raise HTTPException(status_code=403, detail="Administrator access required to access this feature")
+        
     db = SessionLocal()
     cat = db.query(TopicCategory).filter(TopicCategory.id == category_id).first()
     if not cat:
@@ -500,6 +517,9 @@ class ScrapeRequest(BaseModel):
 @app.post("/api/category/scrape")
 async def batch_scrape_category(req: ScrapeRequest):
     """Trigger a batch BrightData scrape specifically targeting a Category."""
+    if config.ADMIN_LOCKED:
+        raise HTTPException(status_code=403, detail="Administrator access required to access this feature")
+        
     db = SessionLocal()
     cat = db.query(TopicCategory).filter(TopicCategory.id == req.category_id).first()
     if not cat:
