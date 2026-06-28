@@ -243,25 +243,36 @@ async def batch_create_categories(req: BatchCategoryCreate):
                         db2.add(BrightDataPost(
                             reddit_id=str(reddit_id),
                             title=post_item.get("title", ""),
-                            url=post_item.get("url", ""),
                             body=post_item.get("body", ""),
                             author=post_item.get("author", ""),
                             score=int(post_item.get("score", 0) or 0),
-                            num_comments=int(post_item.get("num_comments", 0) or 0),
                             topic_id=target_topic_id,
                             snapshot_id=post_item.get("snapshot_id", "batch")
                         ))
                         posts_saved += 1
 
-                    for c in (scraped_comments or []):
+                                        for c in (scraped_comments or []):
                         post_rid = c.get("post_id") or c.get("post_reddit_id")
                         if not post_rid or str(post_rid).lower() in ("none", "null", ""):
                             post_url = c.get("post_url", "")
                             match = _re.search(r'/comments/([a-z0-9]+)', post_url)
                             post_rid = match.group(1) if match else None
 
+                        # Generate unique comment_id if not provided by BrightData
+                        comment_id_val = c.get("id", "")
+                        if not comment_id_val or str(comment_id_val).lower() in ("none", "null", ""):
+                            comment_id_val = f"bd_{post_rid}_{c.get('body', '')[:30].replace(' ', '_').replace(',', '')}_{len(scraped_comments)}"
+                        
+                        # Check for duplicate before inserting
+                        existing_comment = db2.query(BrightDataComment).filter(
+                            BrightDataComment.post_reddit_id == str(post_rid),
+                            BrightDataComment.body == c.get("body", "")
+                        ).first()
+                        if existing_comment:
+                            continue
+
                         db2.add(BrightDataComment(
-                            comment_id=c.get("id", ""),
+                            comment_id=comment_id_val,
                             post_reddit_id=str(post_rid) if post_rid else None,
                             body=c.get("body", ""),
                             author=c.get("author", ""),
