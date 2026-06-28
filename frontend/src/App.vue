@@ -105,7 +105,7 @@
           <div class="tabs">
             <button :class="{active: activeTab === 'analysis'}" @click="activeTab = 'analysis'">Historical Analysis</button>
             <button :class="{active: activeTab === 'charts'}" @click="activeTab = 'charts'">Data Visualizations</button>
-            <button :class="{active: activeTab === 'scrape'}" @click="activeTab = 'scrape'">Batch Scrape</button>
+            <button v-if="!adminLocked" :class="{active: activeTab === 'scrape'}" @click="activeTab = 'scrape'">Batch Scrape</button>
           </div>
           
           <div v-if="activeTab === 'analysis'" class="tab-content">
