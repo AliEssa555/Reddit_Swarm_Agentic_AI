@@ -95,7 +95,7 @@
           <div class="detail-header">
             <h3>{{ selectedCategory.name }} <span class="badge">Deep Dive</span></h3>
             <div class="detail-actions">
-              <button class="action-btn danger-btn" @click="confirmDelete(selectedCategory)">
+              <button v-if="!adminLocked" class="action-btn danger-btn" @click="confirmDelete(selectedCategory)">
                 <span class="btn-icon">🗑️</span> Delete Category
               </button>
               <button class="back-btn" @click="selectedCategory = null">← Back to Overview</button>
